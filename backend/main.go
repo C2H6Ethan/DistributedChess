@@ -1,0 +1,26 @@
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+)
+
+func main() {
+	db := initDB(os.Getenv("DATABASE_URL"))
+	defer db.Close()
+
+	mux := http.NewServeMux()
+
+	// Public routes
+	mux.HandleFunc("POST /register", registerHandler(db))
+	mux.HandleFunc("POST /login", loginHandler(db))
+	mux.HandleFunc("POST /game", createGameHandler(db))
+
+	// Protected routes — JWT required
+	mux.Handle("POST /move", jwtMiddleware(moveHandler(db)))
+
+	addr := ":8080"
+	log.Printf("Referee listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, mux))
+}
