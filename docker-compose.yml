@@ -52,15 +52,32 @@ services:
     labels:
       # Route every request under /api to this service and strip the prefix
       # so the Go handlers receive /register, /login, /move, etc.
+      # Priority 10 > frontend priority 1, making the more-specific rule win
+      # explicitly rather than relying on Traefik's rule-length heuristic.
       - traefik.enable=true
       - traefik.http.routers.backend.entrypoints=web
       - traefik.http.routers.backend.rule=PathPrefix(`/api`)
+      - traefik.http.routers.backend.priority=10
       - traefik.http.middlewares.strip-api.stripprefix.prefixes=/api
       - traefik.http.routers.backend.middlewares=strip-api
       - traefik.http.services.backend.loadbalancer.server.port=8080
     networks:
       - proxy
       - internal
+
+  # ── React frontend (served by nginx, routed by Traefik) ──────────────────────
+  frontend:
+    build: ./frontend
+    labels:
+      # Catch-all: any request that didn't match /api lands here.
+      # Priority 1 ensures the backend's PathPrefix(`/api`) rule always wins.
+      - traefik.enable=true
+      - traefik.http.routers.frontend.entrypoints=web
+      - traefik.http.routers.frontend.rule=PathPrefix(`/`)
+      - traefik.http.routers.frontend.priority=1
+      - traefik.http.services.frontend.loadbalancer.server.port=80
+    networks:
+      - proxy
 
   # ── C++ chess engine (2 replicas, internal only) ─────────────────────────────
   engine:

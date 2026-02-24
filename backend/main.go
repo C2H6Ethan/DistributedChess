@@ -15,10 +15,13 @@ func main() {
 	// Public routes
 	mux.HandleFunc("POST /register", registerHandler(db))
 	mux.HandleFunc("POST /login", loginHandler(db))
-	mux.HandleFunc("POST /game", createGameHandler(db))
 
 	// Protected routes — JWT required
+	mux.Handle("POST /game", jwtMiddleware(createGameHandler(db)))
 	mux.Handle("POST /move", jwtMiddleware(moveHandler(db)))
+	mux.Handle("GET /users", jwtMiddleware(searchUsersHandler(db)))
+	mux.Handle("GET /game/{id}", jwtMiddleware(getGameHandler(db)))
+	mux.Handle("GET /games", jwtMiddleware(myGamesHandler(db)))
 
 	addr := ":8080"
 	log.Printf("Referee listening on %s", addr)

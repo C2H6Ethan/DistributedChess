@@ -7,9 +7,121 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// Game is the full game row joined with player usernames.
+type Game struct {
+	ID            int    `json:"id"`
+	WhiteID       int    `json:"white_id"`
+	BlackID       int    `json:"black_id"`
+	WhiteUsername string `json:"white_username"`
+	BlackUsername string `json:"black_username"`
+	CurrentFEN    string `json:"current_fen"`
+	Status        string `json:"status"`
+}
+
+func scanGame(row interface{ Scan(...any) error }) (Game, error) {
+	var g Game
+	return g, row.Scan(&g.ID, &g.WhiteID, &g.BlackID, &g.CurrentFEN, &g.Status, &g.WhiteUsername, &g.BlackUsername)
+}
+
+const gameQuery = `
+	SELECT g.id, g.white_id, g.black_id, g.current_fen, g.status,
+	       wu.username, bu.username
+	FROM games g
+	JOIN users wu ON wu.id = g.white_id
+	JOIN users bu ON bu.id = g.black_id`
+
+// searchUsersHandler returns users whose username starts with the query.
+// GET /users?q=prefix
+func searchUsersHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		if q == "" {
+			writeJSON(w, http.StatusOK, []any{})
+			return
+		}
+
+		rows, err := db.Query(
+			`SELECT id, username FROM users WHERE username ILIKE $1 ORDER BY username LIMIT 10`,
+			q+"%",
+		)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		type UserResult struct {
+			ID       int    `json:"id"`
+			Username string `json:"username"`
+		}
+		results := []UserResult{}
+		for rows.Next() {
+			var u UserResult
+			if err := rows.Scan(&u.ID, &u.Username); err == nil {
+				results = append(results, u)
+			}
+		}
+		writeJSON(w, http.StatusOK, results)
+	}
+}
+
+// getGameHandler returns the full state of a single game.
+// GET /game/{id}
+func getGameHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r)
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			jsonError(w, "invalid game id", http.StatusBadRequest)
+			return
+		}
+
+		g, err := scanGame(db.QueryRow(gameQuery+` WHERE g.id = $1`, id))
+		if err == sql.ErrNoRows {
+			jsonError(w, "game not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if g.WhiteID != claims.UserID && g.BlackID != claims.UserID {
+			jsonError(w, "not a participant", http.StatusForbidden)
+			return
+		}
+		writeJSON(w, http.StatusOK, g)
+	}
+}
+
+// myGamesHandler returns all games the authenticated user is part of.
+// GET /games
+func myGamesHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r)
+		rows, err := db.Query(
+			gameQuery+` WHERE g.white_id = $1 OR g.black_id = $1 ORDER BY g.id DESC`,
+			claims.UserID,
+		)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		games := []Game{}
+		for rows.Next() {
+			if g, err := scanGame(rows); err == nil {
+				games = append(games, g)
+			}
+		}
+		writeJSON(w, http.StatusOK, games)
+	}
+}
 
 // engineClient is a package-level client so the underlying TCP connection pool
 // is reused across all requests (keep-alive).
