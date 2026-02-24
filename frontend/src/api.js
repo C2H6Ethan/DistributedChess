@@ -31,4 +31,5 @@ export const api = {
   getGame:     (id)                             => req('GET',  `/game/${id}`),
   myGames:     ()                               => req('GET',  '/games'),
   move:        (game_id, uci_move)              => req('POST', '/move',     { game_id, uci_move }),
+  getMoves:    (id)                             => req('GET',  `/game/${id}/moves`),
 }

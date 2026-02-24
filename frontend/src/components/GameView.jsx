@@ -1,31 +1,23 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { Chess } from 'chess.js'
 import { api } from '../api'
 
-// ── Board palette ─────────────────────────────────────────────────────────────
-const LIGHT_SQUARE = '#c7d2fe' // indigo-200
-const DARK_SQUARE  = '#4338ca' // indigo-700
-
-// Square overlay colours
-const COL_LAST_MOVE = 'rgba(255, 255, 51, 0.45)' // yellow tint — last move from/to
-const COL_SELECTED  = 'rgba(99, 102, 241, 0.55)'  // indigo tint — selected piece
-
-// CSS radial gradients matching Chess.com hint style:
-//   empty destination → small filled dot
-//   capture destination → hollow ring (the piece "pokes through")
+// ── Constants ─────────────────────────────────────────────────────────────────
+const INITIAL_FEN  = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+const LIGHT_SQUARE = '#c7d2fe'
+const DARK_SQUARE  = '#4338ca'
+const COL_LAST_MOVE = 'rgba(255, 255, 51, 0.45)'
+const COL_SELECTED  = 'rgba(99, 102, 241, 0.55)'
 const hintDot  = 'radial-gradient(circle, rgba(0,0,0,0.18) 24%, transparent 24%)'
 const hintRing = 'radial-gradient(circle, transparent 58%, rgba(0,0,0,0.22) 58%)'
 
-// ── Status line ───────────────────────────────────────────────────────────────
+// ── Status text ───────────────────────────────────────────────────────────────
 function deriveStatus({ game, isMyTurn, myColor, opponent }) {
   if (game.status !== 'active') {
     const chess = new Chess(game.current_fen)
-    // The side to move after the final move is the one in checkmate (the loser).
     const loserColor = game.current_fen.split(' ')[1]
-    if (chess.isCheckmate()) {
-      return loserColor !== myColor ? 'Checkmate — You win!' : 'Checkmate — You lose'
-    }
+    if (chess.isCheckmate()) return loserColor !== myColor ? 'Checkmate — You win!' : 'Checkmate — You lose'
     if (chess.isStalemate()) return 'Stalemate — Draw'
     if (chess.isDraw())      return 'Draw'
     return 'Game over'
@@ -33,186 +25,290 @@ function deriveStatus({ game, isMyTurn, myColor, opponent }) {
   return isMyTurn ? 'Your turn' : `Waiting for ${opponent}…`
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// ── Move history panel ────────────────────────────────────────────────────────
+function MoveHistory({ fullMoves, highlightedPly, onNavigate, boardSize }) {
+  const activeRef = useRef(null)
+
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [highlightedPly])
+
+  return (
+    <div
+      style={{ height: boardSize }}
+      className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-lg flex flex-col w-40 shrink-0 overflow-hidden"
+    >
+      {/* Header */}
+      <div className="px-3 py-2 border-b border-zinc-800 shrink-0">
+        <p className="text-xs font-medium uppercase tracking-widest text-zinc-500">Moves</p>
+      </div>
+
+      {/* Scrollable list */}
+      <div className="flex-1 overflow-y-auto py-1">
+        {fullMoves.length === 0 ? (
+          <p className="text-zinc-600 text-xs px-3 py-2">No moves yet</p>
+        ) : (
+          fullMoves.map(({ num, white, black }) => (
+            <div key={num} className="flex items-stretch text-xs">
+              {/* Move number */}
+              <span className="w-7 shrink-0 flex items-center justify-end pr-1.5 text-zinc-600 select-none">
+                {num}.
+              </span>
+
+              {/* White's move */}
+              <MoveCell
+                entry={white}
+                highlighted={white.ply === highlightedPly}
+                ref={white.ply === highlightedPly ? activeRef : null}
+                onClick={() => onNavigate(white.ply)}
+              />
+
+              {/* Black's move (may be absent if game ended after white's move) */}
+              {black ? (
+                <MoveCell
+                  entry={black}
+                  highlighted={black.ply === highlightedPly}
+                  ref={black.ply === highlightedPly ? activeRef : null}
+                  onClick={() => onNavigate(black.ply)}
+                />
+              ) : (
+                <span className="flex-1" />
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Arrow key hint */}
+      <div className="px-3 py-2 border-t border-zinc-800 shrink-0">
+        <p className="text-zinc-600 text-xs">← → to navigate</p>
+      </div>
+    </div>
+  )
+}
+
+// Individual move cell — needs forwardRef for the scroll target
+import { forwardRef } from 'react'
+const MoveCell = forwardRef(function MoveCell({ entry, highlighted, onClick }, ref) {
+  return (
+    <button
+      ref={ref}
+      onClick={onClick}
+      className={`flex-1 text-left px-1.5 py-1 rounded transition-colors font-mono ${
+        highlighted
+          ? 'bg-indigo-600 text-white'
+          : 'text-zinc-300 hover:bg-zinc-800'
+      }`}
+    >
+      {entry.san}
+    </button>
+  )
+})
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function GameView({ user, game: initialGame, onGameChange, onLeave }) {
-  const [game, setGame]         = useState(initialGame)
-  const [fen, setFen]           = useState(initialGame.current_fen)
-  const [moving, setMoving]     = useState(false)
-  const [lastMove, setLastMove] = useState(null)  // { from, to }
-  const [moveFrom, setMoveFrom] = useState(null)  // selected square, or null
-  const [error, setError]       = useState(null)
+  const [game, setGame]               = useState(initialGame)
+  const [moves, setMoves]             = useState([])   // [{ ply, uci, fen_after }]
+  const [viewIndex, setViewIndex]     = useState(null) // null = live; N = pinned to position N
+  const [optimisticFen, setOptimistic] = useState(null)
+  const [moving, setMoving]           = useState(false)
+  const [moveFrom, setMoveFrom]       = useState(null)
+  const [error, setError]             = useState(null)
+
+  const prevMovesLen = useRef(0)
 
   const isWhite  = game.white_id === user.id
   const myColor  = isWhite ? 'w' : 'b'
   const opponent = isWhite ? game.black_username : game.white_username
 
-  // Always fresh — derived from the current display FEN, not game.current_fen.
-  const activeColor = fen.split(' ')[1]
-  const isMyTurn    = activeColor === myColor && game.status === 'active'
+  // displayIdx: how many moves deep we are viewing (0 = before any moves)
+  const displayIdx  = viewIndex ?? moves.length
+  // In history when pinned to a position that isn't the latest
+  const isInHistory = displayIdx < moves.length
+  // Interactivity based on the live game state, not the viewed position
+  const liveActiveColor = game.current_fen.split(' ')[1]
+  const isMyTurn        = liveActiveColor === myColor && game.status === 'active'
+  const canMove         = isMyTurn && !moving && !isInHistory
+  const isFinished      = game.status !== 'active'
 
-  // ── Sync display FEN when an external change arrives ────────────────────────
-  // Covers both: authoritative server response after our own move, and opponent
-  // moves delivered by polling.  Clear stale selection in both cases.
+  // ── Fetch moves on mount ──────────────────────────────────────────────────
   useEffect(() => {
-    setFen(game.current_fen)
-    setMoveFrom(null)
-  }, [game.current_fen])
+    api.getMoves(game.id).then(setMoves).catch(() => {})
+  }, [game.id])
 
-  // ── Smart polling ───────────────────────────────────────────────────────────
-  // Active only while waiting for the opponent. Automatically stops when
-  // isMyTurn flips to true and restarts when we submit our move.
+  // ── Jump to live when opponent plays while in history ─────────────────────
   useEffect(() => {
-    if (game.status !== 'active' || isMyTurn) return
+    if (moves.length > prevMovesLen.current && viewIndex !== null) {
+      setViewIndex(null)
+    }
+    prevMovesLen.current = moves.length
+  }, [moves.length]) // eslint-disable-line
 
+  // ── Smart polling ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (isFinished || isMyTurn) return
     const timer = setInterval(async () => {
       try {
-        const updated = await api.getGame(game.id)
+        const [updated, freshMoves] = await Promise.all([
+          api.getGame(game.id),
+          api.getMoves(game.id),
+        ])
         setGame(updated)
         onGameChange(updated)
-      } catch { /* transient network error — retry next tick */ }
+        setMoves(freshMoves)
+      } catch { /* retry next tick */ }
     }, 2000)
-
     return () => clearInterval(timer)
-  }, [game.id, game.status, isMyTurn]) // eslint-disable-line
+  }, [game.id, isFinished, isMyTurn]) // eslint-disable-line
 
-  // ── Core move executor ──────────────────────────────────────────────────────
-  // Both drag-and-drop and click-to-move funnel through here.
-  // Returns true if the move was accepted locally (optimistic update applied).
+  // ── Clear stale selection when the board changes ──────────────────────────
+  useEffect(() => { setMoveFrom(null) }, [displayIdx])
+
+  // ── Keyboard navigation ───────────────────────────────────────────────────
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'ArrowLeft') {
+        const cur = viewIndex ?? moves.length
+        if (cur > 0) setViewIndex(cur - 1)
+      } else if (e.key === 'ArrowRight') {
+        const cur = viewIndex ?? moves.length
+        if (cur < moves.length) {
+          const next = cur + 1
+          setViewIndex(next >= moves.length ? null : next)
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [viewIndex, moves.length])
+
+  // ── Derived: displayed FEN ────────────────────────────────────────────────
+  const displayFen = useMemo(() => {
+    if (displayIdx === 0)             return INITIAL_FEN
+    if (displayIdx >= moves.length)   return optimisticFen ?? game.current_fen
+    return moves[displayIdx - 1].fen_after
+  }, [displayIdx, moves, optimisticFen, game.current_fen])
+
+  // ── Derived: last-move highlight (from DB history, works across sessions) ─
+  const lastMoveHighlight = useMemo(() => {
+    if (displayIdx === 0 || moves.length === 0) return null
+    const m = moves[Math.min(displayIdx, moves.length) - 1]
+    if (!m) return null
+    return { from: m.uci.slice(0, 2), to: m.uci.slice(2, 4) }
+  }, [displayIdx, moves])
+
+  // ── Derived: SAN notation (chess.js replay from start) ───────────────────
+  const sans = useMemo(() => {
+    if (moves.length === 0) return []
+    const chess = new Chess()
+    return moves.map(m => {
+      try {
+        const mv = chess.move({
+          from: m.uci.slice(0, 2),
+          to:   m.uci.slice(2, 4),
+          promotion: m.uci[4] || undefined,
+        })
+        return mv?.san ?? m.uci
+      } catch { return m.uci }
+    })
+  }, [moves])
+
+  // ── Derived: grouped full moves for the history panel ────────────────────
+  const fullMoves = useMemo(() => {
+    const rows = []
+    for (let i = 0; i < sans.length; i += 2) {
+      rows.push({
+        num:   Math.floor(i / 2) + 1,
+        white: { san: sans[i],     ply: i + 1 },
+        black: i + 1 < sans.length ? { san: sans[i + 1], ply: i + 2 } : null,
+      })
+    }
+    return rows
+  }, [sans])
+
+  // highlightedPly = the ply of the move that produced the currently shown position
+  const highlightedPly = displayIdx > 0 ? displayIdx : null
+
+  // ── Square styles (memoised) ──────────────────────────────────────────────
+  const squareStyles = useMemo(() => {
+    const s = {}
+    if (lastMoveHighlight) {
+      s[lastMoveHighlight.from] = { backgroundColor: COL_LAST_MOVE }
+      s[lastMoveHighlight.to]   = { backgroundColor: COL_LAST_MOVE }
+    }
+    if (moveFrom && canMove) {
+      s[moveFrom] = { backgroundColor: COL_SELECTED }
+      const chess = new Chess(displayFen)
+      for (const mv of chess.moves({ square: moveFrom, verbose: true })) {
+        s[mv.to] = { background: mv.captured ? hintRing : hintDot }
+      }
+    }
+    return s
+  }, [lastMoveHighlight, moveFrom, displayFen, canMove])
+
+  // ── Core move executor ────────────────────────────────────────────────────
   function submitMove(from, to) {
-    if (!isMyTurn || moving) return false
-
-    const chess = new Chess(fen)
+    if (!canMove) return false
+    const chess = new Chess(displayFen)
     const move  = chess.move({ from, to, promotion: 'q' })
     if (!move) return false
 
-    // Build UCI string — append promotion piece if chess.js assigned one.
     const uci = `${from}${to}${move.promotion ?? ''}`
-
-    // Optimistic update: show the result immediately, revert on API failure.
-    setFen(chess.fen())
-    setLastMove({ from, to })
+    setOptimistic(chess.fen())
     setMoveFrom(null)
     setMoving(true)
     setError(null)
 
     api.move(game.id, uci)
       .then(result => {
-        if (result.status === 'INVALID') {
-          // Shouldn't reach here (chess.js already validated), but be safe.
-          setFen(game.current_fen)
-          setLastMove(null)
-          return
-        }
-        const isTerminal = result.game_state !== 'ACTIVE'
+        if (result.status === 'INVALID') { setOptimistic(null); return }
         const updated = {
           ...game,
           current_fen: result.new_fen,
-          status: isTerminal ? 'finished' : 'active',
+          status: result.game_state !== 'ACTIVE' ? 'finished' : 'active',
         }
         setGame(updated)
         onGameChange(updated)
-        setFen(result.new_fen)
+        // Refresh move history so last-move highlight is driven by DB
+        api.getMoves(game.id).then(setMoves).catch(() => {})
+        setOptimistic(null)
       })
-      .catch(err => {
-        setFen(game.current_fen)
-        setLastMove(null)
-        setError(err.message)
-      })
+      .catch(err => { setOptimistic(null); setError(err.message) })
       .finally(() => setMoving(false))
 
     return true
   }
 
-  // ── Drag-and-drop handler ───────────────────────────────────────────────────
   function onDrop(from, to) {
-    // A drag implicitly cancels any pending click selection.
     setMoveFrom(null)
     return submitMove(from, to)
   }
 
-  // ── Click-to-move handler ───────────────────────────────────────────────────
-  // State machine:
-  //   idle   → click own piece  → selected
-  //   selected → click same sq  → idle (deselect)
-  //   selected → click legal sq → execute move → idle
-  //   selected → click own piece → re-select that piece
-  //   selected → click other sq → idle (deselect)
   function onSquareClick(square) {
-    if (!isMyTurn || moving) return
-
-    const chess = new Chess(fen)
-
-    // ── Phase 2: a piece is already selected ──────────────────────────────────
+    if (!canMove) return
+    const chess = new Chess(displayFen)
     if (moveFrom) {
-      // Same square → deselect
-      if (square === moveFrom) {
-        setMoveFrom(null)
-        return
-      }
-
-      // Legal destination → fire the move
-      const isLegal = chess
-        .moves({ square: moveFrom, verbose: true })
-        .some(m => m.to === square)
-
-      if (isLegal) {
-        submitMove(moveFrom, square)
-        return
-      }
-
-      // Another friendly piece → change selection
+      if (square === moveFrom) { setMoveFrom(null); return }
+      const isLegal = chess.moves({ square: moveFrom, verbose: true }).some(m => m.to === square)
+      if (isLegal)  { submitMove(moveFrom, square); return }
       const piece = chess.get(square)
-      if (piece && piece.color === myColor) {
-        setMoveFrom(square)
-        return
-      }
-
-      // Anything else → deselect
+      if (piece && piece.color === myColor) { setMoveFrom(square); return }
       setMoveFrom(null)
       return
     }
-
-    // ── Phase 1: nothing selected yet ─────────────────────────────────────────
     const piece = chess.get(square)
-    if (piece && piece.color === myColor) {
-      setMoveFrom(square)
-    }
+    if (piece && piece.color === myColor) setMoveFrom(square)
   }
 
-  // ── Square highlight styles (memoised) ─────────────────────────────────────
-  // Recomputes only when fen, moveFrom, or lastMove actually changes.
-  // Layer order: last-move → selected piece → legal dots/rings.
-  // Each layer intentionally overwrites the previous — selection always reads
-  // cleanly on top of the yellow last-move tint.
-  const squareStyles = useMemo(() => {
-    const styles = {}
+  function navigateTo(ply) {
+    setViewIndex(ply >= moves.length ? null : ply)
+  }
 
-    // Layer 1 — last-move (yellow tint on both from and to squares)
-    if (lastMove) {
-      styles[lastMove.from] = { backgroundColor: COL_LAST_MOVE }
-      styles[lastMove.to]   = { backgroundColor: COL_LAST_MOVE }
-    }
+  // Board size expression (reused for both board and panels)
+  const boardSize = 'min(580px, calc(100vh - 160px), 80vw)'
+  const status    = deriveStatus({ game, isMyTurn, myColor, opponent })
 
-    if (moveFrom) {
-      // Layer 2 — selected piece (indigo tint, overwrites last-move if same sq)
-      styles[moveFrom] = { backgroundColor: COL_SELECTED }
-
-      // Layer 3 — legal destination hints
-      // chess.move.captured handles en-passant correctly (the captured pawn
-      // is not on the `to` square, but move.captured is still set).
-      const chess = new Chess(fen)
-      for (const move of chess.moves({ square: moveFrom, verbose: true })) {
-        styles[move.to] = { background: move.captured ? hintRing : hintDot }
-      }
-    }
-
-    return styles
-  }, [fen, moveFrom, lastMove])
-
-  // ── Render ──────────────────────────────────────────────────────────────────
-  const status     = deriveStatus({ game, isMyTurn, myColor, opponent })
-  const isFinished = game.status !== 'active'
-
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col">
 
@@ -231,24 +327,32 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
       </header>
 
       {/* Main */}
-      <div className="flex-1 flex items-center justify-center gap-6 p-6">
+      <div className="flex-1 flex items-center justify-center gap-6 p-6 overflow-x-auto">
 
-        {/* Board */}
-        <div style={{ width: 'min(580px, calc(100vh - 160px), 80vw)' }}>
+        {/* ── Move history panel (left) ─────────────────────────────── */}
+        <MoveHistory
+          fullMoves={fullMoves}
+          highlightedPly={highlightedPly}
+          onNavigate={navigateTo}
+          boardSize={boardSize}
+        />
+
+        {/* ── Board ────────────────────────────────────────────────── */}
+        <div style={{ width: boardSize }}>
           <Chessboard
-            position={fen}
+            position={displayFen}
             onPieceDrop={onDrop}
             onSquareClick={onSquareClick}
             boardOrientation={isWhite ? 'white' : 'black'}
             customDarkSquareStyle={{ backgroundColor: DARK_SQUARE }}
             customLightSquareStyle={{ backgroundColor: LIGHT_SQUARE }}
             customSquareStyles={squareStyles}
-            arePiecesDraggable={isMyTurn && !moving}
+            arePiecesDraggable={canMove}
             animationDuration={120}
           />
         </div>
 
-        {/* Sidebar */}
+        {/* ── Sidebar ──────────────────────────────────────────────── */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-lg p-5 w-52 shrink-0 self-center space-y-5">
 
           {/* Players */}
@@ -257,17 +361,12 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
               { color: 'b', username: isWhite ? opponent : user.username, dot: 'bg-zinc-700 border border-zinc-500' },
               { color: 'w', username: isWhite ? user.username : opponent, dot: 'bg-zinc-200 border border-zinc-400' },
             ].map(({ color, username, dot }) => {
-              const active = activeColor === color && game.status === 'active'
+              const active = liveActiveColor === color && !isFinished
               return (
-                <div
-                  key={color}
-                  className={`flex items-center gap-2.5 transition-colors ${active ? 'text-zinc-100' : 'text-zinc-500'}`}
-                >
+                <div key={color} className={`flex items-center gap-2.5 transition-colors ${active ? 'text-zinc-100' : 'text-zinc-500'}`}>
                   <span className={`w-3 h-3 rounded-full shrink-0 ${dot}`} />
                   <span className="text-sm truncate">{username}</span>
-                  {active && (
-                    <span className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse shrink-0" />
-                  )}
+                  {active && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse shrink-0" />}
                 </div>
               )
             })}
@@ -283,6 +382,21 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
             </p>
           </div>
 
+          {/* History mode indicator */}
+          {isInHistory && (
+            <div>
+              <p className="text-zinc-500 text-xs mb-2">
+                Move {displayIdx} of {moves.length}
+              </p>
+              <button
+                onClick={() => setViewIndex(null)}
+                className="w-full text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg py-1.5 transition-colors"
+              >
+                ↩ Back to live
+              </button>
+            </div>
+          )}
+
           {error && <p className="text-red-400 text-xs">{error}</p>}
 
           {isFinished && (
@@ -294,7 +408,7 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
             </button>
           )}
 
-          {!isMyTurn && !isFinished && (
+          {!isMyTurn && !isFinished && !isInHistory && (
             <div className="flex items-center gap-2 text-zinc-600 text-xs">
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-600 animate-pulse" />
               Polling…

@@ -30,6 +30,15 @@ func initDB(dsn string) *sql.DB {
 			current_fen TEXT NOT NULL DEFAULT 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
 			status      TEXT NOT NULL DEFAULT 'active'
 		);
+
+		CREATE TABLE IF NOT EXISTS moves (
+			id        SERIAL PRIMARY KEY,
+			game_id   INTEGER NOT NULL REFERENCES games(id),
+			ply       INTEGER NOT NULL,  -- 1-indexed half-move: 1=white's first, 2=black's first, ...
+			uci       TEXT NOT NULL,     -- e.g. "e2e4" or "e7e8q"
+			fen_after TEXT NOT NULL,     -- board state after this move
+			UNIQUE (game_id, ply)
+		);
 	`)
 	if err != nil {
 		log.Fatalf("db migrate: %v", err)

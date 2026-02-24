@@ -286,18 +286,46 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Persist new FEN and update status if the game ended.
+		// Persist new FEN, status, and move record atomically.
 		newStatus := "active"
 		switch engineResp.GameState {
 		case "CHECKMATE", "STALEMATE", "DRAW_50_MOVE", "DRAW_INSUFFICIENT":
 			newStatus = "finished"
 		}
 
-		_, err = db.Exec(
+		tx, err := db.Begin()
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		// ply = number of moves already recorded + 1
+		var ply int
+		if err = tx.QueryRow(
+			`SELECT COUNT(*) + 1 FROM moves WHERE game_id = $1`, body.GameID,
+		).Scan(&ply); err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if _, err = tx.Exec(
 			`UPDATE games SET current_fen = $1, status = $2 WHERE id = $3`,
 			engineResp.NewFEN, newStatus, body.GameID,
-		)
-		if err != nil {
+		); err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if _, err = tx.Exec(
+			`INSERT INTO moves (game_id, ply, uci, fen_after) VALUES ($1, $2, $3, $4)`,
+			body.GameID, ply, body.UCIMove, engineResp.NewFEN,
+		); err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if err = tx.Commit(); err != nil {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -307,5 +335,50 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			"game_state": engineResp.GameState,
 			"new_fen":    engineResp.NewFEN,
 		})
+	}
+}
+
+// MoveRecord is a single half-move in a game's history.
+type MoveRecord struct {
+	Ply      int    `json:"ply"`
+	UCI      string `json:"uci"`
+	FENAfter string `json:"fen_after"`
+}
+
+// getGameMovesHandler returns the ordered move history for a game.
+// The JOIN ensures only participants can read the moves.
+// GET /game/{id}/moves
+func getGameMovesHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r)
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			jsonError(w, "invalid game id", http.StatusBadRequest)
+			return
+		}
+
+		rows, err := db.Query(`
+			SELECT m.ply, m.uci, m.fen_after
+			FROM moves m
+			JOIN games g ON g.id = m.game_id
+			WHERE m.game_id = $1
+			  AND (g.white_id = $2 OR g.black_id = $2)
+			ORDER BY m.ply`,
+			id, claims.UserID,
+		)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		records := []MoveRecord{}
+		for rows.Next() {
+			var m MoveRecord
+			if err := rows.Scan(&m.Ply, &m.UCI, &m.FENAfter); err == nil {
+				records = append(records, m)
+			}
+		}
+		writeJSON(w, http.StatusOK, records)
 	}
 }
