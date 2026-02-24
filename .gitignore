@@ -1,0 +1,79 @@
+# =========================
+# Root & Security
+# =========================
+.env
+*.env
+*.pem
+*.key
+
+# =========================
+# Frontend (React / Node)
+# =========================
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+frontend/.eslintcache
+frontend/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# Backend (Go)
+# =========================
+# Ignore compiled Go binaries
+backend/backend
+backend/*.exe
+backend/*.test
+backend/*.out
+# Ignore vendor directory if you ever use go mod vendor
+backend/vendor/
+
+# =========================
+# Engine (C++ / CMake)
+# =========================
+# Build directories
+engine/build/
+engine/cmake-build-*/
+engine/out/
+engine/bin/
+# CMake generated files
+engine/CMakeCache.txt
+engine/CMakeFiles/
+engine/Makefile
+engine/cmake_install.cmake
+engine/install_manifest.txt
+engine/compile_commands.json
+# Compiled Object files and binaries
+*.o
+*.obj
+*.out
+*.dylib
+*.so
+*.dll
+engine/validator
+engine/run_tests
+
+# =========================
+# Docker & Database
+# =========================
+# Ignore local database mounts if you ever map a local folder instead of a Docker volume
+pgdata/
+postgres-data/
+db-data/
+
+# =========================
+# IDEs & OS Files
+# =========================
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+# JetBrains (CLion / GoLand / WebStorm)
+.idea/
+*.iml
+# Mac / Windows system files
+.DS_Store
+Thumbs.db
