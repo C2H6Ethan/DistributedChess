@@ -53,9 +53,14 @@ export default function Dashboard({ user, onStartGame, onLogout }) {
   const inputRef = useRef(null)
   const dropdownRef = useRef(null)
 
-  // Load games on mount
+  // Load games on mount, then poll every 3 s so incoming challenges and
+  // opponent moves appear without a manual refresh.
   useEffect(() => {
     api.myGames().then(setMyGames).catch(() => {})
+    const timer = setInterval(() => {
+      api.myGames().then(setMyGames).catch(() => {})
+    }, 3000)
+    return () => clearInterval(timer)
   }, [])
 
   // Debounced search — fires 300 ms after the user stops typing
