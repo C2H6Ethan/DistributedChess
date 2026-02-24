@@ -1,0 +1,91 @@
+services:
+
+  # ── Traefik reverse proxy ────────────────────────────────────────────────────
+  traefik:
+    image: traefik:v3.1
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      # Tell Traefik to use the "proxy" network when connecting to containers
+      # that are also on the internal network.
+      - --providers.docker.network=proxy
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB:       chess
+      POSTGRES_USER:     chess
+      POSTGRES_PASSWORD: chess
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chess -d chess"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # ── Go referee (2 replicas, load-balanced by Traefik) ────────────────────────
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgres://chess:chess@postgres:5432/chess?sslmode=disable
+      # Override JWT_SECRET with a real secret via a .env file or
+      # `JWT_SECRET=<value> docker compose up`.
+      JWT_SECRET:    ${JWT_SECRET:-changeme_in_production}
+      # Docker's internal DNS round-robins across engine replicas.
+      ENGINE_URL:    http://engine:8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+    labels:
+      # Route every request under /api to this service and strip the prefix
+      # so the Go handlers receive /register, /login, /move, etc.
+      - traefik.enable=true
+      - traefik.http.routers.backend.entrypoints=web
+      - traefik.http.routers.backend.rule=PathPrefix(`/api`)
+      - traefik.http.middlewares.strip-api.stripprefix.prefixes=/api
+      - traefik.http.routers.backend.middlewares=strip-api
+      - traefik.http.services.backend.loadbalancer.server.port=8080
+    networks:
+      - proxy
+      - internal
+
+  # ── C++ chess engine (2 replicas, internal only) ─────────────────────────────
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile.engine
+    deploy:
+      replicas: 2
+    networks:
+      - internal
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  # Traefik ↔ backend only. Reachable from outside.
+  # name: pins the actual Docker network name so it matches
+  # --providers.docker.network=proxy exactly (without the compose project prefix).
+  proxy:
+    name: proxy
+    driver: bridge
+  # backend ↔ engine ↔ postgres. No external ingress.
+  internal:
+    name: internal
+    driver: bridge
+    internal: true
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  pgdata:

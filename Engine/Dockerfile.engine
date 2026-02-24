@@ -1,0 +1,39 @@
+# ── Stage 1: build ────────────────────────────────────────────────────────────
+FROM alpine:3.21 AS builder
+
+RUN apk add --no-cache \
+        cmake \
+        g++ \
+        ninja \
+        git \
+        make
+
+WORKDIR /src
+
+# Copy only the build manifest first.
+# FetchContent_MakeAvailable runs at cmake configure time, so cpp-httplib and
+# nlohmann/json are downloaded into build/_deps/ in this layer.  Any later
+# source-code change won't bust this cache unless CMakeLists.txt changes.
+COPY CMakeLists.txt .
+RUN cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release 2>/dev/null || true
+
+# Now bring in the rest of the source and do the real build.
+# FETCHCONTENT_FULLY_DISCONNECTED tells cmake to use what is already in
+# build/_deps/ rather than hitting the network again.
+COPY . .
+RUN cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+        -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+    && cmake --build build --target chess_engine --parallel
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+# libstdc++ and libgcc are statically linked into the binary, so the only
+# runtime dependency is musl — already present in the base Alpine image.
+FROM alpine:3.21
+
+WORKDIR /app
+COPY --from=builder /src/build/chess_engine .
+
+EXPOSE 8081
+CMD ["./chess_engine"]
