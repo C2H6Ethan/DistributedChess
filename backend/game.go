@@ -18,12 +18,11 @@ type BotConfig struct {
 	Noise int // centipawn evaluation noise; 0 = deterministic
 }
 
-// botConfigs maps the 1-4 star difficulty selector to C++ search parameters.
+// botConfigs maps the 1-3 star difficulty selector to C++ search parameters.
 var botConfigs = map[int]BotConfig{
 	1: {Depth: 4,  Noise: 400}, // Easy         — looks 2 human moves deep, misjudges by up to 4 pawns
-	2: {Depth: 6,  Noise: 150}, // Novice       — calculates decently, makes positional blunders
-	3: {Depth: 8,  Noise: 0},   // Intermediate — mathematically sound to 4 human moves
-	4: {Depth: 12, Noise: 0},   // Master       — exploits expanded TT, 6 human moves deep
+	2: {Depth: 6,  Noise: 150}, // Intermediate — calculates decently, makes positional blunders
+	3: {Depth: 12, Noise: 0},   // Master       — exploits expanded TT, 6 human moves deep
 }
 
 // Game is the full game row joined with player usernames.
@@ -228,8 +227,8 @@ func createBotGameHandler(db *sql.DB) http.HandlerFunc {
 		var body struct {
 			Difficulty int `json:"difficulty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Difficulty < 1 || body.Difficulty > 4 {
-			jsonError(w, "difficulty must be 1-4", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Difficulty < 1 || body.Difficulty > 3 {
+			jsonError(w, "difficulty must be 1-3", http.StatusBadRequest)
 			return
 		}
 

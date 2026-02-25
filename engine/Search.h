@@ -53,8 +53,12 @@ struct SearchResult {
 };
 
 // Run iterative-deepening negamax with alpha-beta pruning from the given position.
-// noise > 0 adds random root-level evaluation perturbation (centipawns) for weaker bots.
+// noise > 0 perturbs leaf evaluations (centipawns) for weaker bots.
 SearchResult search(Board& board, int depth, int noise = 0);
 
 // Static evaluation of the position (centipawns, positive = good for side to move).
-int evaluate(Board& board);
+// noise > 0 adds random perturbation to the evaluation.
+int evaluate(Board& board, int noise = 0);
+
+// Opening book lookup. Returns a random book move (UCI string) or empty string if no hit.
+std::string book_lookup(const std::string& fen);

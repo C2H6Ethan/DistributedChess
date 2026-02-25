@@ -44,7 +44,7 @@ function GameRow({ game, user, onResume }) {
   )
 }
 
-const DIFFICULTY_LABELS = { 1: 'Easy', 2: 'Novice', 3: 'Intermediate', 4: 'Master' }
+const DIFFICULTY_LABELS = { 1: 'Easy', 2: 'Intermediate', 3: 'Master' }
 
 export default function Dashboard({ user, onStartGame, onLogout }) {
   const [query, setQuery] = useState('')
@@ -170,7 +170,7 @@ export default function Dashboard({ user, onStartGame, onLogout }) {
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 space-y-4">
             {/* Star selector */}
             <div className="flex items-center gap-2">
-              {[1, 2, 3, 4].map(n => (
+              {[1, 2, 3].map(n => (
                 <button
                   key={n}
                   onClick={() => setBotDifficulty(n)}

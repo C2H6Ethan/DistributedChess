@@ -67,6 +67,19 @@ int main() {
             return;
         }
 
+        // Opening book: return instantly if we have a book move.
+        std::string book_move = book_lookup(fen);
+        if (!book_move.empty()) {
+            nlohmann::json resp;
+            resp["best_move"] = book_move;
+            resp["score"] = 0;
+            resp["depth"] = 0;
+            resp["nodes"] = 0;
+            resp["book"] = true;
+            res.set_content(resp.dump(), "application/json");
+            return;
+        }
+
         Board board;
         try {
             board.setup_with_fen(fen);
