@@ -21,6 +21,10 @@ RUN printf 'server {\n\
     listen 80;\n\
     root /usr/share/nginx/html;\n\
     index index.html;\n\
+    location /api/ {\n\
+        return 502 '"'"'{"error":"backend unavailable"}'"'"';\n\
+        add_header Content-Type application/json;\n\
+    }\n\
     location / {\n\
         try_files $uri $uri/ /index.html;\n\
     }\n\

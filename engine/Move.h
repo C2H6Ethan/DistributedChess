@@ -46,7 +46,7 @@ public:
     inline MoveFlags flags() const { return MoveFlags((move >> 12) & 0xf); }
 
     inline bool is_capture() const {
-        return (move >> 12) & CAPTURES;
+        return (move >> 12) & CAPTURE;
     }
 
     void operator=(Move m) { move = m.move; }

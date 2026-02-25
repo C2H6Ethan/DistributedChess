@@ -3,6 +3,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 // ============= Material Values (centipawns) =============
@@ -95,7 +96,7 @@ static inline Square flip_square(Square s) {
 
 // ============= Evaluation =============
 
-int evaluate(Board& board, int noise) {
+int evaluate(Board& board) {
     int score = 0;
 
     for (int sq = 0; sq < 64; sq++) {
@@ -113,16 +114,7 @@ int evaluate(Board& board, int noise) {
     }
 
     // Return relative to side to move.
-    int base_score = (board.get_player_to_move() == WHITE) ? score : -score;
-
-    if (noise > 0) {
-        // Use the Zobrist key to generate pseudo-random, but deterministic noise.
-        // This prevents TT corruption and Alpha-Beta instability.
-        uint64_t hash = board.get_hash();
-        int offset = (hash % (noise * 2 + 1)) - noise;
-        return base_score + offset;
-    }
-    return base_score;
+    return (board.get_player_to_move() == WHITE) ? score : -score;
 }
 
 // ============= Transposition Table =============
@@ -134,17 +126,21 @@ static inline int tt_index(uint64_t key) {
 }
 
 static void tt_store(uint64_t key, int score, int depth, Move best, TTFlag flag, int ply) {
-    // Adjust mate scores for storage (relative to root)
+    // Adjust mate scores for storage (make them root-independent).
     int stored_score = score;
-    if (stored_score > 90000) stored_score += ply;
+    if (stored_score > 90000)  stored_score += ply;
     else if (stored_score < -90000) stored_score -= ply;
 
     TTEntry& e = transposition_table[tt_index(key)];
-    e.key = key;
-    e.score = static_cast<int16_t>(stored_score);
-    e.depth = static_cast<int8_t>(depth);
-    e.best_move_raw = static_cast<uint16_t>(best.to_from());
-    e.flag = flag;
+    // Depth-preferred replacement: preserve deep results from being overwritten by
+    // shallower searches on the same slot, unless the position is different (collision).
+    if (e.key != key || depth >= static_cast<int>(e.depth)) {
+        e.key          = key;
+        e.score        = static_cast<int16_t>(stored_score);
+        e.depth        = static_cast<int8_t>(depth);
+        e.best_move_raw = static_cast<uint16_t>(best.to_from());
+        e.flag         = flag;
+    }
 }
 
 // Returns true if we found a usable TT entry. Sets hash_move always if key matches.
@@ -161,7 +157,7 @@ static bool tt_probe(uint64_t key, int depth, int alpha, int beta, int& score,
 
     int tt_score = e.score;
     // Adjust mate scores back from storage
-    if (tt_score > 90000) tt_score -= ply;
+    if (tt_score > 90000)  tt_score -= ply;
     else if (tt_score < -90000) tt_score += ply;
 
     if (e.flag == TT_EXACT) {
@@ -231,11 +227,11 @@ static void order_moves_scored(Move* moves, int* scores, int count) {
 
 static constexpr int DELTA_MARGIN = 900; // queen value
 
-static int quiescence_search(Board& board, int alpha, int beta, SearchContext* ctx, int noise) {
+static int quiescence_search(Board& board, int alpha, int beta, SearchContext* ctx) {
     ctx->nodes++;
 
     // Stand-pat: static evaluation as a lower bound.
-    int stand_pat = evaluate(board, noise);
+    int stand_pat = evaluate(board);
     if (stand_pat >= beta) return beta;
     if (stand_pat > alpha) alpha = stand_pat;
 
@@ -257,7 +253,7 @@ static int quiescence_search(Board& board, int alpha, int beta, SearchContext* c
 
     for (int i = 0; i < count; i++) {
         board.move(captures[i]);
-        int score = -quiescence_search(board, -beta, -alpha, ctx, noise);
+        int score = -quiescence_search(board, -beta, -alpha, ctx);
         board.undo_move(captures[i]);
 
         if (score >= beta) return beta;
@@ -270,21 +266,12 @@ static int quiescence_search(Board& board, int alpha, int beta, SearchContext* c
 // ============= Negamax with Alpha-Beta, NMP, PVS, LMR =============
 
 static int negamax(Board& board, int depth, int alpha, int beta,
-                   SearchContext* ctx, int ply, int noise, bool no_null = false) {
+                   SearchContext* ctx, int ply, bool no_null = false) {
     bool in_check = board.is_in_check(board.get_player_to_move());
 
     // Check extension: don't enter QS while in check.
-    // QS runs with noise=0 so noisy stand_pat can never trigger a false beta
-    // cutoff that skips captures (e.g. a free queen). The noise offset is
-    // applied HERE, after QS returns a tactically clean result.
     if (depth <= 0 && !in_check) {
-        int qs = quiescence_search(board, alpha, beta, ctx, 0);
-        if (noise > 0) {
-            uint64_t h = board.get_hash();
-            int offset = static_cast<int>(h % static_cast<uint64_t>(noise * 2 + 1)) - noise;
-            qs += offset;
-        }
-        return qs;
+        return quiescence_search(board, alpha, beta, ctx);
     }
     if (depth <= 0 && in_check) {
         depth = 1;
@@ -294,13 +281,21 @@ static int negamax(Board& board, int depth, int alpha, int beta,
 
     bool is_pv = (beta - alpha) > 1;
 
-    // Draw detection
+    // ---- Repetition and Draw detection ----
+    uint64_t hash = board.get_hash();
+
+    // In-search repetition: check if the current position appeared earlier on this
+    // exact search path (same side to move, hence step -2). If so, score as draw.
+    for (int i = ply - 2; i >= 0; i -= 2) {
+        if (ctx->path_hashes[i] == hash) return 0;
+    }
+    ctx->path_hashes[ply] = hash;
+
     if (board.get_halfmove_clock() >= 100 || board.is_insufficient_material()) {
         return 0;
     }
 
     // ---- TT Probe ----
-    uint64_t hash = board.get_hash();
     Move hash_move;
     int tt_score;
     if (tt_probe(hash, depth, alpha, beta, tt_score, hash_move, ply)) {
@@ -312,7 +307,7 @@ static int negamax(Board& board, int depth, int alpha, int beta,
         board.has_non_pawn_material(board.get_player_to_move())) {
         int R = 3;
         board.make_null_move();
-        int null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1, ctx, ply + 1, noise, true);
+        int null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1, ctx, ply + 1, true);
         board.undo_null_move();
 
         if (null_score >= beta) {
@@ -352,30 +347,34 @@ static int negamax(Board& board, int depth, int alpha, int beta,
 
         board.move(moves[i]);
 
+        // Don't apply LMR to moves that give check — they need full-depth verification.
+        bool gives_check = board.is_in_check(board.get_player_to_move());
+
         int score;
 
         // ---- LMR ----
-        bool do_lmr = (i >= 3 && depth >= 3 && !in_check && !is_capture && !is_killer);
+        bool do_lmr = (i >= 3 && depth >= 3 && !in_check && !is_capture
+                       && !is_killer && !gives_check);
         int reduction = 0;
         if (do_lmr) {
             reduction = (i >= 6) ? 2 : 1;
         }
 
         if (i == 0) {
-            // PVS: first move - full window
-            score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1, noise);
+            // PVS: first move — full window
+            score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1);
         } else {
             // PVS: null window search (with LMR reduction)
-            score = -negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ctx, ply + 1, noise);
+            score = -negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ctx, ply + 1);
 
             // Re-search at full depth if LMR reduced search failed high
             if (reduction > 0 && score > alpha) {
-                score = -negamax(board, depth - 1, -alpha - 1, -alpha, ctx, ply + 1, noise);
+                score = -negamax(board, depth - 1, -alpha - 1, -alpha, ctx, ply + 1);
             }
 
             // PVS re-search with full window if null window failed high
             if (score > alpha && score < beta) {
-                score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1, noise);
+                score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1);
             }
         }
 
@@ -434,18 +433,29 @@ SearchResult search(Board& board, int depth, int noise) {
         return result;
     }
 
+    // Seed the RNG once per process lifetime so root randomization varies between
+    // server restarts and isn't the same predictable sequence every time.
+    static bool rand_seeded = false;
+    if (!rand_seeded) {
+        std::srand(static_cast<unsigned>(std::time(nullptr)));
+        rand_seeded = true;
+    }
+
     // Clear search context (killers + history) per search call
     SearchContext ctx;
     ctx.clear();
+
+    // Seed path_hashes with the root position so repetition detection in negamax
+    // can see the position the bot was called from (ply 0).
+    ctx.path_hashes[0] = board.get_hash();
 
     // TT persists across calls (static array) — no clearing needed
 
     // Epsilon threshold for root randomization.
     // Noisy bots use a TIGHT epsilon (5cp) — the noise already creates strategic
-    // variation by distorting leaf evaluations; a wide epsilon would cause random
-    // selection on top of that, including ignoring obvious tactics.
-    // Clean bots (Master) use a slightly wider epsilon (8cp) just to randomize
-    // among genuinely equal moves (transpositions, symmetrical replies, etc.).
+    // variation; a wide epsilon would cause random selection ignoring obvious tactics.
+    // Clean bots (Master) use a slightly wider epsilon (8cp) to randomize among
+    // genuinely equal moves (transpositions, symmetrical replies, etc.).
     const int epsilon = (noise > 0) ? 5 : 8;
 
     // Iterative deepening
@@ -472,17 +482,32 @@ SearchResult search(Board& board, int depth, int noise) {
         // Track per-move scores for final-iteration randomization.
         int root_scores[256] = {};
 
+        // On the final iteration we need TRUE minimax scores for every root move
+        // (not alpha-beta bounds) so the epsilon-pool picks correctly.  With a
+        // shared alpha, once a good capture raises it (e.g. alpha=770), the child
+        // beta becomes -770 and QS stand-pat (~+20) beats it instantly — every
+        // quiet move appears equal to the best capture.
+        //
+        // Fix: final iteration uses independent [-INF, +INF] windows per move.
+        // The TT from the previous iteration makes each independent search fast.
+        // Earlier iterations use normal alpha-beta for speed + TT population.
+        bool final_iter = (d == depth);
+
         for (int i = 0; i < count; i++) {
             board.move(moves[i]);
 
             int score;
-            if (i == 0) {
-                score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1, noise);
+            if (final_iter) {
+                // Independent full-width window: true minimax value.
+                score = -negamax(board, d - 1, INT_MIN + 1, INT_MAX, &ctx, 1);
+            } else if (i == 0) {
+                // PVS: first move — full window
+                score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1);
             } else {
-                // PVS null window
-                score = -negamax(board, d - 1, -alpha - 1, -alpha, &ctx, 1, noise);
+                // PVS: null window
+                score = -negamax(board, d - 1, -alpha - 1, -alpha, &ctx, 1);
                 if (score > alpha && score < beta) {
-                    score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1, noise);
+                    score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1);
                 }
             }
 
@@ -493,16 +518,29 @@ SearchResult search(Board& board, int depth, int noise) {
                 best_score = score;
                 best_move = moves[i];
             }
-            if (score > alpha) alpha = score;
+            if (!final_iter && score > alpha) alpha = score;
         }
 
+        // Save clean score before any noise perturbation — TT must always hold
+        // unperturbed scores so transpositions are correct for all difficulty levels.
+        int clean_best = best_score;
         result.score = best_score;
         result.nodes += ctx.nodes;
 
         // On the final iteration, pool all moves within epsilon of best and
         // pick one at random.  Earlier iterations keep a deterministic best
         // so the TT is populated correctly for the next depth.
-        if (d == depth) {
+        if (final_iter) {
+            if (noise > 0) {
+                for (int i = 0; i < count; i++) {
+                    root_scores[i] += (std::rand() % (noise * 2 + 1)) - noise;
+                }
+                best_score = INT_MIN;
+                for (int i = 0; i < count; i++) {
+                    if (root_scores[i] > best_score) best_score = root_scores[i];
+                }
+                result.score = best_score;
+            }
             std::vector<Move> best_moves;
             for (int i = 0; i < count; i++) {
                 if (root_scores[i] >= best_score - epsilon) {
@@ -514,8 +552,8 @@ SearchResult search(Board& board, int depth, int noise) {
             result.best_move = best_move;
         }
 
-        // Store root position in TT (always use the objectively best move).
-        tt_store(hash, best_score, d, best_move, TT_EXACT, 0);
+        // Store root position in TT using clean score and objectively best move.
+        tt_store(hash, clean_best, d, best_move, TT_EXACT, 0);
     }
 
     return result;

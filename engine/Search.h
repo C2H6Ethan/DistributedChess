@@ -33,11 +33,14 @@ struct SearchContext {
     int nodes;
     Move killers[64][2];    // [ply][slot]
     int history[2][64][64]; // [color][from][to]
+    uint64_t path_hashes[256]; // Zobrist hashes of positions on the current search path,
+                                // indexed by ply. Used to detect in-search repetitions.
 
     void clear() {
         nodes = 0;
         std::memset(killers, 0, sizeof(killers));
         std::memset(history, 0, sizeof(history));
+        // path_hashes are written before being read, no memset needed
     }
 };
 
@@ -50,9 +53,8 @@ struct SearchResult {
 };
 
 // Run iterative-deepening negamax with alpha-beta pruning from the given position.
-// noise > 0 adds deterministic Zobrist-seeded evaluation noise (centipawns) for weaker bots.
+// noise > 0 adds random root-level evaluation perturbation (centipawns) for weaker bots.
 SearchResult search(Board& board, int depth, int noise = 0);
 
 // Static evaluation of the position (centipawns, positive = good for side to move).
-// noise > 0 perturbs the score by up to ±noise centipawns using the Zobrist hash.
-int evaluate(Board& board, int noise = 0);
+int evaluate(Board& board);

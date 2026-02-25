@@ -6,7 +6,10 @@ export default defineConfig({
   server: {
     // Proxy /api to Traefik so the dev server doesn't need CORS headers.
     proxy: {
-      '/api': 'http://localhost',
+      '/api': {
+        target: 'http://localhost:8080',
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
     },
   },
 })

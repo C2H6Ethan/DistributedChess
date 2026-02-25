@@ -23,7 +23,7 @@ var botConfigs = map[int]BotConfig{
 	1: {Depth: 4,  Noise: 400}, // Easy         — looks 2 human moves deep, misjudges by up to 4 pawns
 	2: {Depth: 6,  Noise: 150}, // Novice       — calculates decently, makes positional blunders
 	3: {Depth: 8,  Noise: 0},   // Intermediate — mathematically sound to 4 human moves
-	4: {Depth: 14, Noise: 0},   // Master       — exploits expanded TT, 7 human moves deep
+	4: {Depth: 12, Noise: 0},   // Master       — exploits expanded TT, 6 human moves deep
 }
 
 // Game is the full game row joined with player usernames.
