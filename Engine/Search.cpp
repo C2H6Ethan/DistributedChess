@@ -113,12 +113,67 @@ int evaluate(Board& board) {
     return (board.get_player_to_move() == WHITE) ? score : -score;
 }
 
+// ============= MVV-LVA Move Ordering =============
+
+// Score a move for ordering. Captures are scored by MVV-LVA (victim value minus
+// attacker value) and offset so they always sort above quiet moves.
+static int mvv_lva_score(const Move& m, Board& board) {
+    if (!m.is_capture()) return 0; // quiet moves get the lowest tier
+
+    PieceType attacker = board.get_piece_type_on_square(m.from());
+    PieceType victim   = board.get_piece_type_on_square(m.to());
+
+    // En-passant: the target square is empty but the victim is a pawn.
+    if (victim == NO_PIECE_TYPE) victim = PAWN;
+
+    // Offset by a large constant so every capture sorts above every quiet move.
+    return PIECE_VALUE[victim] - PIECE_VALUE[attacker] + 100000;
+}
+
+static void order_moves(std::vector<Move>& moves, Board& board) {
+    std::stable_sort(moves.begin(), moves.end(),
+        [&board](const Move& a, const Move& b) {
+            return mvv_lva_score(a, board) > mvv_lva_score(b, board);
+        });
+}
+
+// ============= Quiescence Search =============
+
+static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
+    nodes++;
+
+    // Stand-pat: static evaluation as a lower bound.
+    int stand_pat = evaluate(board);
+    if (stand_pat >= beta) return beta;
+    if (stand_pat > alpha) alpha = stand_pat;
+
+    std::vector<Move> moves = board.get_legal_moves();
+
+    // Filter to captures only.
+    moves.erase(
+        std::remove_if(moves.begin(), moves.end(),
+            [](const Move& m) { return !m.is_capture(); }),
+        moves.end());
+
+    order_moves(moves, board);
+
+    for (auto& m : moves) {
+        board.move(m);
+        int score = -quiescence_search(board, -beta, -alpha, nodes);
+        board.undo_move(m);
+
+        if (score >= beta) return beta;
+        if (score > alpha) alpha = score;
+    }
+
+    return alpha;
+}
+
 // ============= Negamax with Alpha-Beta =============
 
 static int negamax(Board& board, int depth, int alpha, int beta, int& nodes) {
     if (depth == 0) {
-        nodes++;
-        return evaluate(board);
+        return quiescence_search(board, alpha, beta, nodes);
     }
 
     std::vector<Move> moves = board.get_legal_moves();
@@ -135,10 +190,7 @@ static int negamax(Board& board, int depth, int alpha, int beta, int& nodes) {
         return 0;
     }
 
-    // Simple move ordering: captures first
-    std::stable_sort(moves.begin(), moves.end(), [](const Move& a, const Move& b) {
-        return a.is_capture() > b.is_capture();
-    });
+    order_moves(moves, board);
 
     int best = INT_MIN;
 
@@ -170,10 +222,7 @@ SearchResult search(Board& board, int depth) {
         return result;
     }
 
-    // Captures first
-    std::stable_sort(moves.begin(), moves.end(), [](const Move& a, const Move& b) {
-        return a.is_capture() > b.is_capture();
-    });
+    order_moves(moves, board);
 
     int alpha = INT_MIN + 1;
     int beta  = INT_MAX;
