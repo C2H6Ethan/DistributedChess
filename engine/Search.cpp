@@ -380,10 +380,8 @@ static int negamax(Board& board, int depth, int alpha, int beta,
                     ctx->killers[ply][0] = moves[i];
                 }
 
-                // History bonus
-                Color c = board.get_player_to_move();
-                // Note: player already toggled back after undo, so current player made the move
-                Color mover = static_cast<Color>(!static_cast<bool>(c));
+                // History bonus — after undo, player_to_move is the side that made the move
+                Color mover = board.get_player_to_move();
                 int bonus = depth * depth;
                 int& h = ctx->history[mover][moves[i].from()][moves[i].to()];
                 h += bonus;
