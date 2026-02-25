@@ -137,8 +137,8 @@ public:
 
     // Move validation
     Move parse_uci_move(const std::string& uci);
-    std::vector<Move> get_legal_moves();
-    std::vector<Move> get_legal_captures();
+    int get_legal_moves(Move* list);
+    int get_legal_captures(Move* list);
     bool is_insufficient_material();
 
     // FEN output

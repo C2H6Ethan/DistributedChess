@@ -130,8 +130,8 @@ static int mvv_lva_score(const Move& m, Board& board) {
     return PIECE_VALUE[victim] - PIECE_VALUE[attacker] + 100000;
 }
 
-static void order_moves(std::vector<Move>& moves, Board& board) {
-    std::sort(moves.begin(), moves.end(),
+static void order_moves(Move* moves, int count, Board& board) {
+    std::sort(moves, moves + count,
         [&board](const Move& a, const Move& b) {
             return mvv_lva_score(a, board) > mvv_lva_score(b, board);
         });
@@ -152,14 +152,15 @@ static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
     // Delta pruning: if even capturing a queen can't raise us to alpha, bail out.
     if (stand_pat + DELTA_MARGIN < alpha) return alpha;
 
-    std::vector<Move> captures = board.get_legal_captures();
+    Move captures[256];
+    int count = board.get_legal_captures(captures);
 
-    order_moves(captures, board);
+    order_moves(captures, count, board);
 
-    for (auto& m : captures) {
-        board.move(m);
+    for (int i = 0; i < count; i++) {
+        board.move(captures[i]);
         int score = -quiescence_search(board, -beta, -alpha, nodes);
-        board.undo_move(m);
+        board.undo_move(captures[i]);
 
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
@@ -171,15 +172,22 @@ static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
 // ============= Negamax with Alpha-Beta =============
 
 static int negamax(Board& board, int depth, int alpha, int beta, int& nodes) {
-    if (depth == 0) {
+    bool in_check = board.is_in_check(board.get_player_to_move());
+
+    // Check extension: don't enter QS while in check — extend to find evasions.
+    if (depth <= 0 && !in_check) {
         return quiescence_search(board, alpha, beta, nodes);
     }
+    if (depth <= 0 && in_check) {
+        depth = 1;
+    }
 
-    std::vector<Move> moves = board.get_legal_moves();
+    Move moves[256];
+    int count = board.get_legal_moves(moves);
 
     // Terminal detection
-    if (moves.empty()) {
-        if (board.is_in_check(board.get_player_to_move())) {
+    if (count == 0) {
+        if (in_check) {
             return -100000 + (100 - depth); // prefer shorter mates
         }
         return 0; // stalemate
@@ -189,14 +197,14 @@ static int negamax(Board& board, int depth, int alpha, int beta, int& nodes) {
         return 0;
     }
 
-    order_moves(moves, board);
+    order_moves(moves, count, board);
 
     int best = INT_MIN;
 
-    for (auto& m : moves) {
-        board.move(m);
+    for (int i = 0; i < count; i++) {
+        board.move(moves[i]);
         int score = -negamax(board, depth - 1, -beta, -alpha, nodes);
-        board.undo_move(m);
+        board.undo_move(moves[i]);
 
         if (score > best) best = score;
         if (score > alpha) alpha = score;
@@ -214,26 +222,27 @@ SearchResult search(Board& board, int depth) {
     result.score = INT_MIN;
     result.nodes = 0;
 
-    std::vector<Move> moves = board.get_legal_moves();
+    Move moves[256];
+    int count = board.get_legal_moves(moves);
 
-    if (moves.empty()) {
+    if (count == 0) {
         result.score = board.is_in_check(board.get_player_to_move()) ? -100000 : 0;
         return result;
     }
 
-    order_moves(moves, board);
+    order_moves(moves, count, board);
 
     int alpha = INT_MIN + 1;
     int beta  = INT_MAX;
 
-    for (auto& m : moves) {
-        board.move(m);
+    for (int i = 0; i < count; i++) {
+        board.move(moves[i]);
         int score = -negamax(board, depth - 1, -beta, -alpha, result.nodes);
-        board.undo_move(m);
+        board.undo_move(moves[i]);
 
         if (score > result.score) {
             result.score = score;
-            result.best_move = m;
+            result.best_move = moves[i];
         }
         if (score > alpha) alpha = score;
     }

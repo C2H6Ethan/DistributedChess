@@ -979,45 +979,47 @@ int Board::get_halfmove_clock() const {
 }
 
 Move Board::parse_uci_move(const std::string& uci) {
-    for (const Move& m : get_legal_moves()) {
-        if (m.to_uci() == uci) return m;
+    Move moves[256];
+    int count = get_legal_moves(moves);
+    for (int i = 0; i < count; i++) {
+        if (moves[i].to_uci() == uci) return moves[i];
     }
     return Move();
 }
 
-std::vector<Move> Board::get_legal_moves() {
-    Move moves[256];
-    Move* end = generate_pseudo_legal_moves(moves);
-    std::vector<Move> legal;
+int Board::get_legal_moves(Move* list) {
+    Move pseudo[256];
+    Move* end = generate_pseudo_legal_moves(pseudo);
+    int count = 0;
 
-    for (Move* m = moves; m < end; ++m) {
+    for (Move* m = pseudo; m < end; ++m) {
         move(*m);
         Color us = (player_to_move == WHITE) ? BLACK : WHITE;
         if (!is_in_check(us)) {
-            legal.push_back(*m);
+            list[count++] = *m;
         }
         undo_move(*m);
     }
 
-    return legal;
+    return count;
 }
 
-std::vector<Move> Board::get_legal_captures() {
-    Move moves[256];
-    Move* end = generate_pseudo_legal_moves(moves);
-    std::vector<Move> legal;
+int Board::get_legal_captures(Move* list) {
+    Move pseudo[256];
+    Move* end = generate_pseudo_legal_moves(pseudo);
+    int count = 0;
 
-    for (Move* m = moves; m < end; ++m) {
+    for (Move* m = pseudo; m < end; ++m) {
         if (!m->is_capture()) continue;
         move(*m);
         Color us = (player_to_move == WHITE) ? BLACK : WHITE;
         if (!is_in_check(us)) {
-            legal.push_back(*m);
+            list[count++] = *m;
         }
         undo_move(*m);
     }
 
-    return legal;
+    return count;
 }
 
 bool Board::is_insufficient_material() {
