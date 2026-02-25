@@ -25,7 +25,7 @@ struct TTEntry {
 
 static_assert(sizeof(TTEntry) == 16, "TTEntry should be 16 bytes");
 
-constexpr int TT_SIZE = 1 << 20; // ~16MB
+constexpr int TT_SIZE = 1 << 24; // ~256MB, supports Depth 14+ without overwriting root nodes
 
 // ============= Search Context =============
 
@@ -50,8 +50,9 @@ struct SearchResult {
 };
 
 // Run iterative-deepening negamax with alpha-beta pruning from the given position.
-// Returns the best move, its score, and node count.
-SearchResult search(Board& board, int depth);
+// noise > 0 adds deterministic Zobrist-seeded evaluation noise (centipawns) for weaker bots.
+SearchResult search(Board& board, int depth, int noise = 0);
 
 // Static evaluation of the position (centipawns, positive = good for side to move).
-int evaluate(Board& board);
+// noise > 0 perturbs the score by up to ±noise centipawns using the Zobrist hash.
+int evaluate(Board& board, int noise = 0);

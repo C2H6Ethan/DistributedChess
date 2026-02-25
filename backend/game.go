@@ -12,13 +12,18 @@ import (
 	"time"
 )
 
-// botDepthByDifficulty maps the 1-4 star difficulty selector to C++ search depths.
-// Easy (1) = very shallow for fast, weak play. Master (4) = full depth, strong play.
-var botDepthByDifficulty = map[int]int{
-	1: 2, // Easy        — instant, random-ish
-	2: 4, // Novice      — plays reasonable moves
-	3: 6, // Intermediate — solid tactical play
-	4: 12, // Master      — strong, slow
+// BotConfig holds the search parameters for a given difficulty level.
+type BotConfig struct {
+	Depth int
+	Noise int // centipawn evaluation noise; 0 = deterministic
+}
+
+// botConfigs maps the 1-4 star difficulty selector to C++ search parameters.
+var botConfigs = map[int]BotConfig{
+	1: {Depth: 4,  Noise: 400}, // Easy         — looks 2 human moves deep, misjudges by up to 4 pawns
+	2: {Depth: 6,  Noise: 150}, // Novice       — calculates decently, makes positional blunders
+	3: {Depth: 8,  Noise: 0},   // Intermediate — mathematically sound to 4 human moves
+	4: {Depth: 14, Noise: 0},   // Master       — exploits expanded TT, 7 human moves deep
 }
 
 // Game is the full game row joined with player usernames.
@@ -228,7 +233,7 @@ func createBotGameHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		depth, ok := botDepthByDifficulty[body.Difficulty]
+		cfg, ok := botConfigs[body.Difficulty]
 		if !ok {
 			jsonError(w, "invalid difficulty", http.StatusBadRequest)
 			return
@@ -236,8 +241,8 @@ func createBotGameHandler(db *sql.DB) http.HandlerFunc {
 
 		var gameID int
 		err := db.QueryRow(
-			`INSERT INTO games (white_id, black_id, bot_depth) VALUES ($1, 0, $2) RETURNING id`,
-			claims.UserID, depth,
+			`INSERT INTO games (white_id, black_id, bot_depth, bot_noise) VALUES ($1, 0, $2, $3) RETURNING id`,
+			claims.UserID, cfg.Depth, cfg.Noise,
 		).Scan(&gameID)
 		if err != nil {
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -265,12 +270,12 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Load game state.
-		var whiteID, blackID, botDepth int
+		var whiteID, blackID, botDepth, botNoise int
 		var currentFEN, status string
 		err := db.QueryRow(
-			`SELECT white_id, black_id, current_fen, status, bot_depth FROM games WHERE id = $1`,
+			`SELECT white_id, black_id, current_fen, status, bot_depth, bot_noise FROM games WHERE id = $1`,
 			body.GameID,
-		).Scan(&whiteID, &blackID, &currentFEN, &status, &botDepth)
+		).Scan(&whiteID, &blackID, &currentFEN, &status, &botDepth, &botNoise)
 		if err == sql.ErrNoRows {
 			jsonError(w, "game not found", http.StatusNotFound)
 			return
@@ -381,7 +386,7 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			opponentID = whiteID
 		}
 		if opponentID == 0 && newStatus == "active" {
-			go fireBotMove(db, body.GameID, engineResp.NewFEN, botDepth)
+			go fireBotMove(db, body.GameID, engineResp.NewFEN, botDepth, botNoise)
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -394,10 +399,11 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 
 // fireBotMove calls the C++ engine to pick the best move, then persists it.
 // Runs in a goroutine so it doesn't block the human player's HTTP response.
-func fireBotMove(db *sql.DB, gameID int, fen string, depth int) {
+func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int) {
 	searchPayload, _ := json.Marshal(map[string]any{
 		"fen":   fen,
 		"depth": depth,
+		"noise": noise,
 	})
 	searchClient := &http.Client{Timeout: 120 * time.Second}
 	resp, err := searchClient.Post(engineURL()+"/search", "application/json", bytes.NewReader(searchPayload))

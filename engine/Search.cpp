@@ -93,7 +93,7 @@ static inline Square flip_square(Square s) {
 
 // ============= Evaluation =============
 
-int evaluate(Board& board) {
+int evaluate(Board& board, int noise) {
     int score = 0;
 
     for (int sq = 0; sq < 64; sq++) {
@@ -111,7 +111,16 @@ int evaluate(Board& board) {
     }
 
     // Return relative to side to move.
-    return (board.get_player_to_move() == WHITE) ? score : -score;
+    int base_score = (board.get_player_to_move() == WHITE) ? score : -score;
+
+    if (noise > 0) {
+        // Use the Zobrist key to generate pseudo-random, but deterministic noise.
+        // This prevents TT corruption and Alpha-Beta instability.
+        uint64_t hash = board.get_hash();
+        int offset = (hash % (noise * 2 + 1)) - noise;
+        return base_score + offset;
+    }
+    return base_score;
 }
 
 // ============= Transposition Table =============
@@ -220,11 +229,11 @@ static void order_moves_scored(Move* moves, int* scores, int count) {
 
 static constexpr int DELTA_MARGIN = 900; // queen value
 
-static int quiescence_search(Board& board, int alpha, int beta, SearchContext* ctx) {
+static int quiescence_search(Board& board, int alpha, int beta, SearchContext* ctx, int noise) {
     ctx->nodes++;
 
     // Stand-pat: static evaluation as a lower bound.
-    int stand_pat = evaluate(board);
+    int stand_pat = evaluate(board, noise);
     if (stand_pat >= beta) return beta;
     if (stand_pat > alpha) alpha = stand_pat;
 
@@ -246,7 +255,7 @@ static int quiescence_search(Board& board, int alpha, int beta, SearchContext* c
 
     for (int i = 0; i < count; i++) {
         board.move(captures[i]);
-        int score = -quiescence_search(board, -beta, -alpha, ctx);
+        int score = -quiescence_search(board, -beta, -alpha, ctx, noise);
         board.undo_move(captures[i]);
 
         if (score >= beta) return beta;
@@ -259,12 +268,12 @@ static int quiescence_search(Board& board, int alpha, int beta, SearchContext* c
 // ============= Negamax with Alpha-Beta, NMP, PVS, LMR =============
 
 static int negamax(Board& board, int depth, int alpha, int beta,
-                   SearchContext* ctx, int ply, bool no_null = false) {
+                   SearchContext* ctx, int ply, int noise, bool no_null = false) {
     bool in_check = board.is_in_check(board.get_player_to_move());
 
     // Check extension: don't enter QS while in check
     if (depth <= 0 && !in_check) {
-        return quiescence_search(board, alpha, beta, ctx);
+        return quiescence_search(board, alpha, beta, ctx, noise);
     }
     if (depth <= 0 && in_check) {
         depth = 1;
@@ -292,7 +301,7 @@ static int negamax(Board& board, int depth, int alpha, int beta,
         board.has_non_pawn_material(board.get_player_to_move())) {
         int R = 3;
         board.make_null_move();
-        int null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1, ctx, ply + 1, true);
+        int null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1, ctx, ply + 1, noise, true);
         board.undo_null_move();
 
         if (null_score >= beta) {
@@ -343,19 +352,19 @@ static int negamax(Board& board, int depth, int alpha, int beta,
 
         if (i == 0) {
             // PVS: first move - full window
-            score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1);
+            score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1, noise);
         } else {
             // PVS: null window search (with LMR reduction)
-            score = -negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ctx, ply + 1);
+            score = -negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ctx, ply + 1, noise);
 
             // Re-search at full depth if LMR reduced search failed high
             if (reduction > 0 && score > alpha) {
-                score = -negamax(board, depth - 1, -alpha - 1, -alpha, ctx, ply + 1);
+                score = -negamax(board, depth - 1, -alpha - 1, -alpha, ctx, ply + 1, noise);
             }
 
             // PVS re-search with full window if null window failed high
             if (score > alpha && score < beta) {
-                score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1);
+                score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1, noise);
             }
         }
 
@@ -400,7 +409,7 @@ static int negamax(Board& board, int depth, int alpha, int beta,
 
 // ============= Top-level Search (Iterative Deepening) =============
 
-SearchResult search(Board& board, int depth) {
+SearchResult search(Board& board, int depth, int noise) {
     SearchResult result;
     result.best_move = Move();
     result.score = INT_MIN;
@@ -446,12 +455,12 @@ SearchResult search(Board& board, int depth) {
 
             int score;
             if (i == 0) {
-                score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1);
+                score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1, noise);
             } else {
                 // PVS null window
-                score = -negamax(board, d - 1, -alpha - 1, -alpha, &ctx, 1);
+                score = -negamax(board, d - 1, -alpha - 1, -alpha, &ctx, 1, noise);
                 if (score > alpha && score < beta) {
-                    score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1);
+                    score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1, noise);
                 }
             }
 

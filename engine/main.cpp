@@ -55,6 +55,7 @@ int main() {
 
         std::string fen = body["fen"].get<std::string>();
         int depth = body.value("depth", 4);
+        int noise = body.value("noise", 0);
 
         if (depth < 1 || depth > 20) {
             res.status = 400;
@@ -71,7 +72,7 @@ int main() {
             return;
         }
 
-        SearchResult result = search(board, depth);
+        SearchResult result = search(board, depth, noise);
 
         nlohmann::json resp;
         resp["best_move"] = result.best_move.to_uci();

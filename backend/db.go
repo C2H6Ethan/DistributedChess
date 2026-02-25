@@ -31,7 +31,8 @@ func initDB(dsn string) *sql.DB {
 			status      TEXT NOT NULL DEFAULT 'active',
 			white_hints INTEGER NOT NULL DEFAULT 3,
 			black_hints INTEGER NOT NULL DEFAULT 3,
-			bot_depth   INTEGER NOT NULL DEFAULT 0
+			bot_depth   INTEGER NOT NULL DEFAULT 0,
+			bot_noise   INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS moves (
@@ -53,10 +54,14 @@ func initDB(dsn string) *sql.DB {
 		log.Fatalf("db seed engine user: %v", err)
 	}
 
-	// Idempotent column addition for existing deployments.
+	// Idempotent column additions for existing deployments.
 	_, err = db.Exec(`ALTER TABLE games ADD COLUMN IF NOT EXISTS bot_depth INTEGER NOT NULL DEFAULT 0`)
 	if err != nil {
 		log.Fatalf("db migrate bot_depth: %v", err)
+	}
+	_, err = db.Exec(`ALTER TABLE games ADD COLUMN IF NOT EXISTS bot_noise INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		log.Fatalf("db migrate bot_noise: %v", err)
 	}
 
 	return db
