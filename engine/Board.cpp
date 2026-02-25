@@ -14,6 +14,54 @@
 namespace {
     const std::string whitePiecesString = "PNBRQK";
     const std::string blackPiecesString = "pnbrqk";
+
+    // ============= Zobrist Hashing =============
+    // 768 piece-square (2 colors * 6 types * 64 squares) + 1 side + 4 castling + 8 ep files = 781
+    uint64_t ZOBRIST_TABLE[781];
+    bool zobrist_initialized = false;
+
+    // splitmix64 PRNG with fixed seed for deterministic keys
+    uint64_t splitmix64(uint64_t& state) {
+        state += 0x9e3779b97f4a7c15ULL;
+        uint64_t z = state;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+        return z ^ (z >> 31);
+    }
+
+    void init_zobrist_table() {
+        if (zobrist_initialized) return;
+        uint64_t seed = 0x12345678ABCDEF01ULL;
+        for (int i = 0; i < 781; i++) {
+            ZOBRIST_TABLE[i] = splitmix64(seed);
+        }
+        zobrist_initialized = true;
+    }
+
+    // Indices into ZOBRIST_TABLE:
+    // [0..767]   = piece_key: color * 384 + type * 64 + square
+    // [768]      = side_key (black to move)
+    // [769..772] = castling (WK, WQ, BK, BQ)
+    // [773..780] = ep file (0..7)
+
+    inline uint64_t piece_key(Color c, PieceType pt, Square s) {
+        return ZOBRIST_TABLE[c * 384 + pt * 64 + s];
+    }
+    inline uint64_t side_key() {
+        return ZOBRIST_TABLE[768];
+    }
+    inline uint64_t castling_key(CastlingRights cr) {
+        uint64_t h = 0;
+        if (cr.white_king_side)  h ^= ZOBRIST_TABLE[769];
+        if (cr.white_queen_side) h ^= ZOBRIST_TABLE[770];
+        if (cr.black_king_side)  h ^= ZOBRIST_TABLE[771];
+        if (cr.black_queen_side) h ^= ZOBRIST_TABLE[772];
+        return h;
+    }
+    inline uint64_t ep_key(Square epsq) {
+        if (epsq == NO_SQUARE) return 0;
+        return ZOBRIST_TABLE[773 + (epsq % 8)];
+    }
 }
 
 // Precompute attack/move tables
@@ -284,6 +332,8 @@ constexpr auto KING_ATTACKS = init_king_attacks();
 
 
 Board::Board() {
+    init_zobrist_table();
+
     // Clear bitboards
     for (auto &color: bitboards) {
         for (auto &pieceBitboard: color) {
@@ -307,6 +357,7 @@ Board::Board() {
     game_ply = 0;
     full_move_counter = 1;
     halfmove_clock = 0;
+    zobrist_key = 0;
 }
 
 // ============= Setup Methods =============
@@ -389,6 +440,18 @@ void Board::setup_with_fen(std::string fen) {
     history[0].castling_rights = castling_rights;
     history[0].halfmove_clock = halfmove_clock;
     history[0].full_move_counter = full_move_counter;
+
+    // Recompute zobrist key from scratch
+    zobrist_key = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (mailbox[sq].type != NO_PIECE_TYPE) {
+            zobrist_key ^= piece_key(mailbox[sq].color, mailbox[sq].type, static_cast<Square>(sq));
+        }
+    }
+    if (player_to_move == BLACK) zobrist_key ^= side_key();
+    zobrist_key ^= castling_key(castling_rights);
+    zobrist_key ^= ep_key(history[0].epsq);
+    history[0].zobrist_key = zobrist_key;
 }
 
 // ============= Move Execution =============
@@ -402,6 +465,13 @@ void Board::move(Move m) {
     game_ply++;
     history[game_ply] = UndoInfo(history[game_ply - 1]);
     history[game_ply].entry |= BitboardUtil::square_to_bitboard(to) | BitboardUtil::square_to_bitboard(from);
+
+    // Save zobrist key for O(1) undo
+    history[game_ply].zobrist_key = zobrist_key;
+
+    // XOR out old castling and ep before the move modifies them
+    zobrist_key ^= castling_key(castling_rights);
+    zobrist_key ^= ep_key(history[game_ply - 1].epsq);
 
     auto piece_type = get_piece_type_on_square(from);
     switch (piece_type) {
@@ -533,6 +603,11 @@ void Board::move(Move m) {
     history[game_ply].halfmove_clock = halfmove_clock;
     history[game_ply].full_move_counter = full_move_counter;
 
+    // XOR in new castling, ep, and side toggle
+    zobrist_key ^= castling_key(castling_rights);
+    zobrist_key ^= ep_key(history[game_ply].epsq);
+    zobrist_key ^= side_key();
+
     player_to_move = static_cast<Color>(!static_cast<bool>(player_to_move));
 }
 
@@ -593,6 +668,9 @@ void Board::undo_move(Move m) {
             put_piece(to, history[game_ply].captured);
             break;
     }
+
+    // Restore zobrist from saved state (before game_ply decrement)
+    zobrist_key = history[game_ply].zobrist_key;
 
     game_ply--;
     castling_rights = history[game_ply].castling_rights;
@@ -946,6 +1024,7 @@ void Board::put_piece(Square s, Piece p) {
     occupancy[p.color] |= bb;
     occupancy[BOTH] |= bb;
     mailbox[s] = p;
+    zobrist_key ^= piece_key(p.color, p.type, s);
 }
 
 void Board::remove_piece(Square s) {
@@ -956,6 +1035,7 @@ void Board::remove_piece(Square s) {
     occupancy[p.color] &= ~bb;
     occupancy[BOTH] &= ~bb;
     mailbox[s].type = NO_PIECE_TYPE;
+    zobrist_key ^= piece_key(p.color, p.type, s);
 }
 
 
@@ -1116,6 +1196,45 @@ void Board::print() {
         std::cout << '\n';
     }
     std::cout << "  a b c d e f g h\n";
+}
+
+// ============= Null Move =============
+
+void Board::make_null_move() {
+    game_ply++;
+    history[game_ply] = UndoInfo(history[game_ply - 1]);
+    history[game_ply].zobrist_key = zobrist_key;
+
+    // XOR out old ep
+    zobrist_key ^= ep_key(history[game_ply - 1].epsq);
+    // Clear ep
+    history[game_ply].epsq = NO_SQUARE;
+    // Copy castling rights (unchanged)
+    history[game_ply].castling_rights = castling_rights;
+    history[game_ply].halfmove_clock = halfmove_clock;
+    history[game_ply].full_move_counter = full_move_counter;
+
+    // Toggle side
+    zobrist_key ^= side_key();
+    player_to_move = static_cast<Color>(!static_cast<bool>(player_to_move));
+}
+
+void Board::undo_null_move() {
+    zobrist_key = history[game_ply].zobrist_key;
+    game_ply--;
+    player_to_move = static_cast<Color>(!static_cast<bool>(player_to_move));
+    castling_rights = history[game_ply].castling_rights;
+    halfmove_clock = history[game_ply].halfmove_clock;
+    full_move_counter = history[game_ply].full_move_counter;
+}
+
+uint64_t Board::get_hash() const {
+    return zobrist_key;
+}
+
+bool Board::has_non_pawn_material(Color c) const {
+    return (bitboards[c][KNIGHT] | bitboards[c][BISHOP] |
+            bitboards[c][ROOK] | bitboards[c][QUEEN]) != 0;
 }
 
 // ============= Accessors =============

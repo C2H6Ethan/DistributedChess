@@ -66,6 +66,7 @@ struct UndoInfo {
     CastlingRights castling_rights = {true, true, true, true};
     int halfmove_clock = 0;
     uint16_t full_move_counter = 1;
+    uint64_t zobrist_key = 0;
 
     UndoInfo() = default;
 
@@ -90,6 +91,7 @@ private:
     int game_ply;
     uint16_t full_move_counter;
     int halfmove_clock;
+    uint64_t zobrist_key;
 
     // Move Generation
     Move* generate_pawn_moves(Move *list, Square from_square);
@@ -134,6 +136,12 @@ public:
     Color get_player_to_move();
     bool is_in_check(Color player);
     int get_halfmove_clock() const;
+    uint64_t get_hash() const;
+    bool has_non_pawn_material(Color c) const;
+
+    // Null move
+    void make_null_move();
+    void undo_null_move();
 
     // Move validation
     Move parse_uci_move(const std::string& uci);

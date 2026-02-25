@@ -1,6 +1,7 @@
 #include "Search.h"
 #include <algorithm>
 #include <climits>
+#include <cstring>
 
 // ============= Material Values (centipawns) =============
 static constexpr int PIECE_VALUE[PIECE_TYPE_COUNT] = {
@@ -113,36 +114,114 @@ int evaluate(Board& board) {
     return (board.get_player_to_move() == WHITE) ? score : -score;
 }
 
-// ============= MVV-LVA Move Ordering =============
+// ============= Transposition Table =============
 
-// Score a move for ordering. Captures are scored by MVV-LVA (victim value minus
-// attacker value) and offset so they always sort above quiet moves.
-static int mvv_lva_score(const Move& m, Board& board) {
-    if (!m.is_capture()) return 0; // quiet moves get the lowest tier
+static TTEntry transposition_table[TT_SIZE];
 
-    PieceType attacker = board.get_piece_type_on_square(m.from());
-    PieceType victim   = board.get_piece_type_on_square(m.to());
-
-    // En-passant: the target square is empty but the victim is a pawn.
-    if (victim == NO_PIECE_TYPE) victim = PAWN;
-
-    // Offset by a large constant so every capture sorts above every quiet move.
-    return PIECE_VALUE[victim] - PIECE_VALUE[attacker] + 100000;
+static inline int tt_index(uint64_t key) {
+    return key & (TT_SIZE - 1);
 }
 
-static void order_moves(Move* moves, int count, Board& board) {
-    std::sort(moves, moves + count,
-        [&board](const Move& a, const Move& b) {
-            return mvv_lva_score(a, board) > mvv_lva_score(b, board);
-        });
+static void tt_store(uint64_t key, int score, int depth, Move best, TTFlag flag, int ply) {
+    // Adjust mate scores for storage (relative to root)
+    int stored_score = score;
+    if (stored_score > 90000) stored_score += ply;
+    else if (stored_score < -90000) stored_score -= ply;
+
+    TTEntry& e = transposition_table[tt_index(key)];
+    e.key = key;
+    e.score = static_cast<int16_t>(stored_score);
+    e.depth = static_cast<int8_t>(depth);
+    e.best_move_raw = static_cast<uint16_t>(best.to_from());
+    e.flag = flag;
+}
+
+// Returns true if we found a usable TT entry. Sets hash_move always if key matches.
+static bool tt_probe(uint64_t key, int depth, int alpha, int beta, int& score,
+                     Move& hash_move, int ply) {
+    const TTEntry& e = transposition_table[tt_index(key)];
+    if (e.key != key) return false;
+
+    // Always extract hash move for ordering
+    hash_move = Move(e.best_move_raw);
+
+    // Only use score if depth is sufficient
+    if (e.depth < depth) return false;
+
+    int tt_score = e.score;
+    // Adjust mate scores back from storage
+    if (tt_score > 90000) tt_score -= ply;
+    else if (tt_score < -90000) tt_score += ply;
+
+    if (e.flag == TT_EXACT) {
+        score = tt_score;
+        return true;
+    }
+    if (e.flag == TT_BETA && tt_score >= beta) {
+        score = tt_score;
+        return true;
+    }
+    if (e.flag == TT_ALPHA && tt_score <= alpha) {
+        score = tt_score;
+        return true;
+    }
+
+    return false;
+}
+
+// ============= Move Scoring =============
+
+static constexpr int HASH_MOVE_SCORE  = 10000000;
+static constexpr int CAPTURE_BASE     = 1000000;
+static constexpr int KILLER1_SCORE    = 900000;
+static constexpr int KILLER2_SCORE    = 800000;
+
+static int score_move(const Move& m, Board& board, const SearchContext* ctx,
+                      int ply, Move hash_move) {
+    // Hash move highest priority
+    if (m.to_from() == hash_move.to_from() && hash_move.to_from() != 0) {
+        return HASH_MOVE_SCORE;
+    }
+
+    // Captures: MVV-LVA
+    if (m.is_capture()) {
+        PieceType attacker = board.get_piece_type_on_square(m.from());
+        PieceType victim   = board.get_piece_type_on_square(m.to());
+        if (victim == NO_PIECE_TYPE) victim = PAWN; // en passant
+        return CAPTURE_BASE + PIECE_VALUE[victim] - PIECE_VALUE[attacker];
+    }
+
+    // Killer moves
+    if (ply < 64) {
+        if (m.to_from() == ctx->killers[ply][0].to_from()) return KILLER1_SCORE;
+        if (m.to_from() == ctx->killers[ply][1].to_from()) return KILLER2_SCORE;
+    }
+
+    // History heuristic
+    Color c = board.get_player_to_move();
+    return ctx->history[c][m.from()][m.to()];
+}
+
+static void order_moves_scored(Move* moves, int* scores, int count) {
+    // Selection sort — good enough for small arrays, avoids allocation
+    for (int i = 0; i < count - 1; i++) {
+        int best_idx = i;
+        for (int j = i + 1; j < count; j++) {
+            if (scores[j] > scores[best_idx]) best_idx = j;
+        }
+        if (best_idx != i) {
+            std::swap(moves[i], moves[best_idx]);
+            std::swap(scores[i], scores[best_idx]);
+        }
+    }
 }
 
 // ============= Quiescence Search =============
 
 static constexpr int DELTA_MARGIN = 900; // queen value
 
-static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
-    nodes++;
+static int quiescence_search(Board& board, int alpha, int beta, SearchContext* ctx) {
+    ctx->nodes++;
 
     // Stand-pat: static evaluation as a lower bound.
     int stand_pat = evaluate(board);
@@ -155,11 +234,19 @@ static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
     Move captures[256];
     int count = board.get_legal_captures(captures);
 
-    order_moves(captures, count, board);
+    // Simple MVV-LVA ordering for captures
+    int scores[256];
+    for (int i = 0; i < count; i++) {
+        PieceType attacker = board.get_piece_type_on_square(captures[i].from());
+        PieceType victim   = board.get_piece_type_on_square(captures[i].to());
+        if (victim == NO_PIECE_TYPE) victim = PAWN;
+        scores[i] = PIECE_VALUE[victim] - PIECE_VALUE[attacker];
+    }
+    order_moves_scored(captures, scores, count);
 
     for (int i = 0; i < count; i++) {
         board.move(captures[i]);
-        int score = -quiescence_search(board, -beta, -alpha, nodes);
+        int score = -quiescence_search(board, -beta, -alpha, ctx);
         board.undo_move(captures[i]);
 
         if (score >= beta) return beta;
@@ -169,52 +256,151 @@ static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
     return alpha;
 }
 
-// ============= Negamax with Alpha-Beta =============
+// ============= Negamax with Alpha-Beta, NMP, PVS, LMR =============
 
-static int negamax(Board& board, int depth, int alpha, int beta, int& nodes) {
+static int negamax(Board& board, int depth, int alpha, int beta,
+                   SearchContext* ctx, int ply, bool no_null = false) {
     bool in_check = board.is_in_check(board.get_player_to_move());
 
-    // Check extension: don't enter QS while in check — extend to find evasions.
+    // Check extension: don't enter QS while in check
     if (depth <= 0 && !in_check) {
-        return quiescence_search(board, alpha, beta, nodes);
+        return quiescence_search(board, alpha, beta, ctx);
     }
     if (depth <= 0 && in_check) {
         depth = 1;
     }
 
+    ctx->nodes++;
+
+    bool is_pv = (beta - alpha) > 1;
+
+    // Draw detection
+    if (board.get_halfmove_clock() >= 100 || board.is_insufficient_material()) {
+        return 0;
+    }
+
+    // ---- TT Probe ----
+    uint64_t hash = board.get_hash();
+    Move hash_move;
+    int tt_score;
+    if (tt_probe(hash, depth, alpha, beta, tt_score, hash_move, ply)) {
+        return tt_score;
+    }
+
+    // ---- Null Move Pruning ----
+    if (!in_check && depth >= 3 && !is_pv && !no_null &&
+        board.has_non_pawn_material(board.get_player_to_move())) {
+        int R = 3;
+        board.make_null_move();
+        int null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1, ctx, ply + 1, true);
+        board.undo_null_move();
+
+        if (null_score >= beta) {
+            return beta;
+        }
+    }
+
+    // ---- Move Generation ----
     Move moves[256];
     int count = board.get_legal_moves(moves);
 
     // Terminal detection
     if (count == 0) {
         if (in_check) {
-            return -100000 + (100 - depth); // prefer shorter mates
+            return -100000 + ply; // prefer shorter mates
         }
         return 0; // stalemate
     }
 
-    if (board.get_halfmove_clock() >= 100 || board.is_insufficient_material()) {
-        return 0;
+    // ---- Move Ordering ----
+    int scores[256];
+    for (int i = 0; i < count; i++) {
+        scores[i] = score_move(moves[i], board, ctx, ply, hash_move);
     }
+    order_moves_scored(moves, scores, count);
 
-    order_moves(moves, count, board);
-
+    // ---- Search Moves ----
+    Move best_move = moves[0];
     int best = INT_MIN;
+    TTFlag tt_flag = TT_ALPHA;
 
     for (int i = 0; i < count; i++) {
+        bool is_capture = moves[i].is_capture();
+        bool is_killer = (ply < 64) &&
+            (moves[i].to_from() == ctx->killers[ply][0].to_from() ||
+             moves[i].to_from() == ctx->killers[ply][1].to_from());
+
         board.move(moves[i]);
-        int score = -negamax(board, depth - 1, -beta, -alpha, nodes);
+
+        int score;
+
+        // ---- LMR ----
+        bool do_lmr = (i >= 3 && depth >= 3 && !in_check && !is_capture && !is_killer);
+        int reduction = 0;
+        if (do_lmr) {
+            reduction = (i >= 6) ? 2 : 1;
+        }
+
+        if (i == 0) {
+            // PVS: first move - full window
+            score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1);
+        } else {
+            // PVS: null window search (with LMR reduction)
+            score = -negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ctx, ply + 1);
+
+            // Re-search at full depth if LMR reduced search failed high
+            if (reduction > 0 && score > alpha) {
+                score = -negamax(board, depth - 1, -alpha - 1, -alpha, ctx, ply + 1);
+            }
+
+            // PVS re-search with full window if null window failed high
+            if (score > alpha && score < beta) {
+                score = -negamax(board, depth - 1, -beta, -alpha, ctx, ply + 1);
+            }
+        }
+
         board.undo_move(moves[i]);
 
-        if (score > best) best = score;
-        if (score > alpha) alpha = score;
-        if (alpha >= beta) break; // beta cutoff
+        if (score > best) {
+            best = score;
+            best_move = moves[i];
+        }
+        if (score > alpha) {
+            alpha = score;
+            tt_flag = TT_EXACT;
+        }
+        if (alpha >= beta) {
+            tt_flag = TT_BETA;
+
+            // Update killers and history for quiet beta cutoffs
+            if (!is_capture && ply < 64) {
+                // Shift killer slots
+                if (moves[i].to_from() != ctx->killers[ply][0].to_from()) {
+                    ctx->killers[ply][1] = ctx->killers[ply][0];
+                    ctx->killers[ply][0] = moves[i];
+                }
+
+                // History bonus
+                Color c = board.get_player_to_move();
+                // Note: player already toggled back after undo, so current player made the move
+                Color mover = static_cast<Color>(!static_cast<bool>(c));
+                int bonus = depth * depth;
+                int& h = ctx->history[mover][moves[i].from()][moves[i].to()];
+                h += bonus;
+                if (h > 1000000) h = 1000000;
+            }
+
+            break;
+        }
     }
+
+    // ---- TT Store ----
+    tt_store(hash, best, depth, best_move, tt_flag, ply);
 
     return best;
 }
 
-// ============= Top-level Search =============
+// ============= Top-level Search (Iterative Deepening) =============
 
 SearchResult search(Board& board, int depth) {
     SearchResult result;
@@ -230,21 +416,62 @@ SearchResult search(Board& board, int depth) {
         return result;
     }
 
-    order_moves(moves, count, board);
+    // Clear search context (killers + history) per search call
+    SearchContext ctx;
+    ctx.clear();
 
-    int alpha = INT_MIN + 1;
-    int beta  = INT_MAX;
+    // TT persists across calls (static array) — no clearing needed
 
-    for (int i = 0; i < count; i++) {
-        board.move(moves[i]);
-        int score = -negamax(board, depth - 1, -beta, -alpha, result.nodes);
-        board.undo_move(moves[i]);
+    // Iterative deepening
+    for (int d = 1; d <= depth; d++) {
+        ctx.nodes = 0;
 
-        if (score > result.score) {
-            result.score = score;
-            result.best_move = moves[i];
+        int alpha = INT_MIN + 1;
+        int beta  = INT_MAX;
+        int best_score = INT_MIN;
+        Move best_move = moves[0];
+
+        // Score and order moves using TT from previous iteration
+        uint64_t hash = board.get_hash();
+        Move hash_move;
+        int dummy;
+        tt_probe(hash, 0, alpha, beta, dummy, hash_move, 0);
+
+        int scores[256];
+        for (int i = 0; i < count; i++) {
+            scores[i] = score_move(moves[i], board, &ctx, 0, hash_move);
         }
-        if (score > alpha) alpha = score;
+        order_moves_scored(moves, scores, count);
+
+        for (int i = 0; i < count; i++) {
+            board.move(moves[i]);
+
+            int score;
+            if (i == 0) {
+                score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1);
+            } else {
+                // PVS null window
+                score = -negamax(board, d - 1, -alpha - 1, -alpha, &ctx, 1);
+                if (score > alpha && score < beta) {
+                    score = -negamax(board, d - 1, -beta, -alpha, &ctx, 1);
+                }
+            }
+
+            board.undo_move(moves[i]);
+
+            if (score > best_score) {
+                best_score = score;
+                best_move = moves[i];
+            }
+            if (score > alpha) alpha = score;
+        }
+
+        result.best_move = best_move;
+        result.score = best_score;
+        result.nodes += ctx.nodes;
+
+        // Store root position in TT
+        tt_store(hash, best_score, d, best_move, TT_EXACT, 0);
     }
 
     return result;
