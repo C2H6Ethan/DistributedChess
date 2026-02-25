@@ -27,6 +27,8 @@ add_library(ChessCore
         Move.h
         Validator.cpp
         Validator.h
+        Search.cpp
+        Search.h
 )
 
 # 2. Production REST microservice binary (port 8081)
