@@ -8,15 +8,20 @@ export function setToken(t) {
   t ? localStorage.setItem('chess_token', t) : localStorage.removeItem('chess_token')
 }
 
-async function req(method, path, body) {
+async function req(method, path, body, { timeout = 10000 } = {}) {
   const headers = { 'Content-Type': 'application/json' }
   if (_token) headers['Authorization'] = `Bearer ${_token}`
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
 
   const res = await fetch(BASE + path, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: controller.signal,
   })
+  clearTimeout(timer)
 
   const data = await res.json()
   if (!res.ok) throw new Error(data.error ?? 'Request failed')
@@ -32,4 +37,5 @@ export const api = {
   myGames:     ()                               => req('GET',  '/games'),
   move:        (game_id, uci_move)              => req('POST', '/move',     { game_id, uci_move }),
   getMoves:    (id)                             => req('GET',  `/game/${id}/moves`),
+  getHint:     (id)                             => req('GET',  `/game/${id}/hint`, undefined, { timeout: 120000 }),
 }

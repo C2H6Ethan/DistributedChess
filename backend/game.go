@@ -338,6 +338,87 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// hintHandler asks the C++ engine for the best move at depth 7.
+// GET /game/{id}/hint
+func hintHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r)
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			jsonError(w, "invalid game id", http.StatusBadRequest)
+			return
+		}
+
+		var whiteID, blackID int
+		var currentFEN, status string
+		err = db.QueryRow(
+			`SELECT white_id, black_id, current_fen, status FROM games WHERE id = $1`, id,
+		).Scan(&whiteID, &blackID, &currentFEN, &status)
+		if err == sql.ErrNoRows {
+			jsonError(w, "game not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if whiteID != claims.UserID && blackID != claims.UserID {
+			jsonError(w, "not a participant", http.StatusForbidden)
+			return
+		}
+		if status != "active" {
+			jsonError(w, "game is over", http.StatusConflict)
+			return
+		}
+
+		color, err := activeColor(currentFEN)
+		if err != nil {
+			jsonError(w, "corrupt game state", http.StatusInternalServerError)
+			return
+		}
+		if color == 'w' && claims.UserID != whiteID {
+			jsonError(w, "not your turn", http.StatusForbidden)
+			return
+		}
+		if color == 'b' && claims.UserID != blackID {
+			jsonError(w, "not your turn", http.StatusForbidden)
+			return
+		}
+
+		payload, _ := json.Marshal(map[string]any{
+			"fen":   currentFEN,
+			"depth": 7,
+		})
+		// Use a long timeout — search can be slow on unoptimised engines.
+		searchClient := &http.Client{Timeout: 120 * time.Second}
+		resp, err := searchClient.Post(engineURL()+"/search", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			jsonError(w, "engine unreachable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		var engineResp struct {
+			BestMove string `json:"best_move"`
+			Score    int    `json:"score"`
+			Error    string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&engineResp); err != nil {
+			jsonError(w, "invalid engine response", http.StatusBadGateway)
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			jsonError(w, "engine error: "+engineResp.Error, http.StatusBadGateway)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"best_move": engineResp.BestMove,
+			"score":     engineResp.Score,
+		})
+	}
+}
+
 // MoveRecord is a single half-move in a game's history.
 type MoveRecord struct {
 	Ply      int    `json:"ply"`

@@ -9,6 +9,7 @@ const LIGHT_SQUARE = '#c7d2fe'
 const DARK_SQUARE  = '#4338ca'
 const COL_LAST_MOVE = 'rgba(255, 255, 51, 0.45)'
 const COL_SELECTED  = 'rgba(99, 102, 241, 0.55)'
+const COL_HINT      = 'rgba(34, 197, 94, 0.55)'
 const hintDot  = 'radial-gradient(circle, rgba(0,0,0,0.18) 24%, transparent 24%)'
 const hintRing = 'radial-gradient(circle, transparent 58%, rgba(0,0,0,0.22) 58%)'
 
@@ -114,6 +115,9 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
   const [moving, setMoving]           = useState(false)
   const [moveFrom, setMoveFrom]       = useState(null)
   const [error, setError]             = useState(null)
+  const [hintsLeft, setHintsLeft]     = useState(3)
+  const [hintLoading, setHintLoading] = useState(false)
+  const [hintSquares, setHintSquares] = useState(null) // { from, to }
 
   const prevMovesLen = useRef(0)
 
@@ -161,8 +165,8 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
     return () => clearInterval(timer)
   }, [game.id, isFinished, isMyTurn]) // eslint-disable-line
 
-  // ── Clear stale selection when the board changes ──────────────────────────
-  useEffect(() => { setMoveFrom(null) }, [displayIdx])
+  // ── Clear stale selection / hint when the board changes ─────────────────
+  useEffect(() => { setMoveFrom(null); setHintSquares(null) }, [displayIdx])
 
   // ── Keyboard navigation ───────────────────────────────────────────────────
   useEffect(() => {
@@ -236,6 +240,10 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
       s[lastMoveHighlight.from] = { backgroundColor: COL_LAST_MOVE }
       s[lastMoveHighlight.to]   = { backgroundColor: COL_LAST_MOVE }
     }
+    if (hintSquares) {
+      s[hintSquares.from] = { backgroundColor: COL_HINT }
+      s[hintSquares.to]   = { backgroundColor: COL_HINT }
+    }
     if (moveFrom && canMove) {
       s[moveFrom] = { backgroundColor: COL_SELECTED }
       const chess = new Chess(displayFen)
@@ -244,7 +252,7 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
       }
     }
     return s
-  }, [lastMoveHighlight, moveFrom, displayFen, canMove])
+  }, [lastMoveHighlight, hintSquares, moveFrom, displayFen, canMove])
 
   // ── Core move executor ────────────────────────────────────────────────────
   function submitMove(from, to) {
@@ -256,6 +264,7 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
     const uci = `${from}${to}${move.promotion ?? ''}`
     setOptimistic(chess.fen())
     setMoveFrom(null)
+    setHintSquares(null)
     setMoving(true)
     setError(null)
 
@@ -381,6 +390,43 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
               {status}
             </p>
           </div>
+
+          {/* Hint button */}
+          {isMyTurn && !isInHistory && hintsLeft > 0 && (
+            <button
+              onClick={async () => {
+                if (hintLoading) return
+                setHintLoading(true)
+                setHintSquares(null)
+                try {
+                  const data = await api.getHint(game.id)
+                  const from = data.best_move.slice(0, 2)
+                  const to   = data.best_move.slice(2, 4)
+                  setHintSquares({ from, to })
+                  setHintsLeft(h => h - 1)
+                } catch (err) {
+                  setError(err.message)
+                } finally {
+                  setHintLoading(false)
+                }
+              }}
+              disabled={hintLoading}
+              className="w-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 rounded-lg py-2 text-sm font-medium transition-colors"
+            >
+              {hintLoading ? (
+                <span className="inline-flex items-center gap-1">
+                  Thinking
+                  <span className="inline-flex gap-0.5">
+                    <span className="w-1 h-1 rounded-full bg-current animate-bounce [animation-delay:0ms]" />
+                    <span className="w-1 h-1 rounded-full bg-current animate-bounce [animation-delay:150ms]" />
+                    <span className="w-1 h-1 rounded-full bg-current animate-bounce [animation-delay:300ms]" />
+                  </span>
+                </span>
+              ) : (
+                `Hint (${hintsLeft} left)`
+              )}
+            </button>
+          )}
 
           {/* History mode indicator */}
           {isInHistory && (
