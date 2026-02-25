@@ -18,7 +18,7 @@ var botDepthByDifficulty = map[int]int{
 	1: 2, // Easy        — instant, random-ish
 	2: 4, // Novice      — plays reasonable moves
 	3: 6, // Intermediate — solid tactical play
-	4: 8, // Master      — strong, slow
+	4: 12, // Master      — strong, slow
 }
 
 // Game is the full game row joined with player usernames.
@@ -519,7 +519,7 @@ func hintHandler(db *sql.DB) http.HandlerFunc {
 
 		payload, _ := json.Marshal(map[string]any{
 			"fen":   currentFEN,
-			"depth": 7,
+			"depth": 12,
 		})
 		// Use a long timeout — search can be slow on unoptimised engines.
 		searchClient := &http.Client{Timeout: 120 * time.Second}
