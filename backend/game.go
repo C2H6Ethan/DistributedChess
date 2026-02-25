@@ -21,16 +21,18 @@ type Game struct {
 	BlackUsername string `json:"black_username"`
 	CurrentFEN    string `json:"current_fen"`
 	Status        string `json:"status"`
+	WhiteHints    int    `json:"white_hints"`
+	BlackHints    int    `json:"black_hints"`
 }
 
 func scanGame(row interface{ Scan(...any) error }) (Game, error) {
 	var g Game
-	return g, row.Scan(&g.ID, &g.WhiteID, &g.BlackID, &g.CurrentFEN, &g.Status, &g.WhiteUsername, &g.BlackUsername)
+	return g, row.Scan(&g.ID, &g.WhiteID, &g.BlackID, &g.CurrentFEN, &g.Status, &g.WhiteUsername, &g.BlackUsername, &g.WhiteHints, &g.BlackHints)
 }
 
 const gameQuery = `
 	SELECT g.id, g.white_id, g.black_id, g.current_fen, g.status,
-	       wu.username, bu.username
+	       wu.username, bu.username, g.white_hints, g.black_hints
 	FROM games g
 	JOIN users wu ON wu.id = g.white_id
 	JOIN users bu ON bu.id = g.black_id`
@@ -351,9 +353,10 @@ func hintHandler(db *sql.DB) http.HandlerFunc {
 
 		var whiteID, blackID int
 		var currentFEN, status string
+		var whiteHints, blackHints int
 		err = db.QueryRow(
-			`SELECT white_id, black_id, current_fen, status FROM games WHERE id = $1`, id,
-		).Scan(&whiteID, &blackID, &currentFEN, &status)
+			`SELECT white_id, black_id, current_fen, status, white_hints, black_hints FROM games WHERE id = $1`, id,
+		).Scan(&whiteID, &blackID, &currentFEN, &status, &whiteHints, &blackHints)
 		if err == sql.ErrNoRows {
 			jsonError(w, "game not found", http.StatusNotFound)
 			return
@@ -385,6 +388,17 @@ func hintHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Check remaining hints for the caller.
+		isCallerWhite := claims.UserID == whiteID
+		remaining := blackHints
+		if isCallerWhite {
+			remaining = whiteHints
+		}
+		if remaining <= 0 {
+			jsonError(w, "no hints remaining", http.StatusForbidden)
+			return
+		}
+
 		payload, _ := json.Marshal(map[string]any{
 			"fen":   currentFEN,
 			"depth": 7,
@@ -412,9 +426,20 @@ func hintHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Decrement hints only after a successful engine response.
+		col := "black_hints"
+		if isCallerWhite {
+			col = "white_hints"
+		}
+		_, _ = db.Exec(
+			fmt.Sprintf(`UPDATE games SET %s = %s - 1 WHERE id = $1 AND %s > 0`, col, col, col),
+			id,
+		)
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"best_move": engineResp.BestMove,
-			"score":     engineResp.Score,
+			"best_move":  engineResp.BestMove,
+			"score":      engineResp.Score,
+			"hints_left": remaining - 1,
 		})
 	}
 }

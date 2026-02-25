@@ -28,7 +28,9 @@ func initDB(dsn string) *sql.DB {
 			white_id    INTEGER NOT NULL REFERENCES users(id),
 			black_id    INTEGER NOT NULL REFERENCES users(id),
 			current_fen TEXT NOT NULL DEFAULT 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
-			status      TEXT NOT NULL DEFAULT 'active'
+			status      TEXT NOT NULL DEFAULT 'active',
+			white_hints INTEGER NOT NULL DEFAULT 3,
+			black_hints INTEGER NOT NULL DEFAULT 3
 		);
 
 		CREATE TABLE IF NOT EXISTS moves (

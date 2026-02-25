@@ -115,7 +115,9 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
   const [moving, setMoving]           = useState(false)
   const [moveFrom, setMoveFrom]       = useState(null)
   const [error, setError]             = useState(null)
-  const [hintsLeft, setHintsLeft]     = useState(3)
+  const [hintsLeft, setHintsLeft]     = useState(
+    initialGame.white_id === user.id ? initialGame.white_hints : initialGame.black_hints
+  )
   const [hintLoading, setHintLoading] = useState(false)
   const [hintSquares, setHintSquares] = useState(null) // { from, to }
 
@@ -403,7 +405,7 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
                   const from = data.best_move.slice(0, 2)
                   const to   = data.best_move.slice(2, 4)
                   setHintSquares({ from, to })
-                  setHintsLeft(h => h - 1)
+                  setHintsLeft(data.hints_left)
                 } catch (err) {
                   setError(err.message)
                 } finally {
