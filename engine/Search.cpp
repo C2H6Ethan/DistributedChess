@@ -273,9 +273,18 @@ static int negamax(Board& board, int depth, int alpha, int beta,
                    SearchContext* ctx, int ply, int noise, bool no_null = false) {
     bool in_check = board.is_in_check(board.get_player_to_move());
 
-    // Check extension: don't enter QS while in check
+    // Check extension: don't enter QS while in check.
+    // QS runs with noise=0 so noisy stand_pat can never trigger a false beta
+    // cutoff that skips captures (e.g. a free queen). The noise offset is
+    // applied HERE, after QS returns a tactically clean result.
     if (depth <= 0 && !in_check) {
-        return quiescence_search(board, alpha, beta, ctx, noise);
+        int qs = quiescence_search(board, alpha, beta, ctx, 0);
+        if (noise > 0) {
+            uint64_t h = board.get_hash();
+            int offset = static_cast<int>(h % static_cast<uint64_t>(noise * 2 + 1)) - noise;
+            qs += offset;
+        }
+        return qs;
     }
     if (depth <= 0 && in_check) {
         depth = 1;
@@ -432,9 +441,12 @@ SearchResult search(Board& board, int depth, int noise) {
     // TT persists across calls (static array) — no clearing needed
 
     // Epsilon threshold for root randomization.
-    // Wider with noise (human-like bots) so more moves qualify; tight for
-    // deterministic play (Master) so only truly equal moves are pooled.
-    const int epsilon = (noise > 0) ? 40 : 8;
+    // Noisy bots use a TIGHT epsilon (5cp) — the noise already creates strategic
+    // variation by distorting leaf evaluations; a wide epsilon would cause random
+    // selection on top of that, including ignoring obvious tactics.
+    // Clean bots (Master) use a slightly wider epsilon (8cp) just to randomize
+    // among genuinely equal moves (transpositions, symmetrical replies, etc.).
+    const int epsilon = (noise > 0) ? 5 : 8;
 
     // Iterative deepening
     for (int d = 1; d <= depth; d++) {
