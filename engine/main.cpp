@@ -1,10 +1,14 @@
 #include <iostream>
+#include <cstdlib>
+#include <ctime>
 #include "httplib.h"
 #include "nlohmann/json.hpp"
 #include "Validator.h"
 #include "Search.h"
 
 int main() {
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+
     httplib::Server svr;
 
     svr.Post("/move", [](const httplib::Request& req, httplib::Response& res) {

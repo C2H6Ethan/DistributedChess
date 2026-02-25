@@ -1,7 +1,9 @@
 #include "Search.h"
 #include <algorithm>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 
 // ============= Material Values (centipawns) =============
 static constexpr int PIECE_VALUE[PIECE_TYPE_COUNT] = {
@@ -429,6 +431,11 @@ SearchResult search(Board& board, int depth, int noise) {
 
     // TT persists across calls (static array) — no clearing needed
 
+    // Epsilon threshold for root randomization.
+    // Wider with noise (human-like bots) so more moves qualify; tight for
+    // deterministic play (Master) so only truly equal moves are pooled.
+    const int epsilon = (noise > 0) ? 40 : 8;
+
     // Iterative deepening
     for (int d = 1; d <= depth; d++) {
         ctx.nodes = 0;
@@ -450,6 +457,9 @@ SearchResult search(Board& board, int depth, int noise) {
         }
         order_moves_scored(moves, scores, count);
 
+        // Track per-move scores for final-iteration randomization.
+        int root_scores[256] = {};
+
         for (int i = 0; i < count; i++) {
             board.move(moves[i]);
 
@@ -466,6 +476,7 @@ SearchResult search(Board& board, int depth, int noise) {
 
             board.undo_move(moves[i]);
 
+            root_scores[i] = score;
             if (score > best_score) {
                 best_score = score;
                 best_move = moves[i];
@@ -473,11 +484,25 @@ SearchResult search(Board& board, int depth, int noise) {
             if (score > alpha) alpha = score;
         }
 
-        result.best_move = best_move;
         result.score = best_score;
         result.nodes += ctx.nodes;
 
-        // Store root position in TT
+        // On the final iteration, pool all moves within epsilon of best and
+        // pick one at random.  Earlier iterations keep a deterministic best
+        // so the TT is populated correctly for the next depth.
+        if (d == depth) {
+            std::vector<Move> best_moves;
+            for (int i = 0; i < count; i++) {
+                if (root_scores[i] >= best_score - epsilon) {
+                    best_moves.push_back(moves[i]);
+                }
+            }
+            result.best_move = best_moves[std::rand() % best_moves.size()];
+        } else {
+            result.best_move = best_move;
+        }
+
+        // Store root position in TT (always use the objectively best move).
         tt_store(hash, best_score, d, best_move, TT_EXACT, 0);
     }
 
