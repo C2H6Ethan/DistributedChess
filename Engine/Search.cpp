@@ -131,13 +131,15 @@ static int mvv_lva_score(const Move& m, Board& board) {
 }
 
 static void order_moves(std::vector<Move>& moves, Board& board) {
-    std::stable_sort(moves.begin(), moves.end(),
+    std::sort(moves.begin(), moves.end(),
         [&board](const Move& a, const Move& b) {
             return mvv_lva_score(a, board) > mvv_lva_score(b, board);
         });
 }
 
 // ============= Quiescence Search =============
+
+static constexpr int DELTA_MARGIN = 900; // queen value
 
 static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
     nodes++;
@@ -147,17 +149,14 @@ static int quiescence_search(Board& board, int alpha, int beta, int& nodes) {
     if (stand_pat >= beta) return beta;
     if (stand_pat > alpha) alpha = stand_pat;
 
-    std::vector<Move> moves = board.get_legal_moves();
+    // Delta pruning: if even capturing a queen can't raise us to alpha, bail out.
+    if (stand_pat + DELTA_MARGIN < alpha) return alpha;
 
-    // Filter to captures only.
-    moves.erase(
-        std::remove_if(moves.begin(), moves.end(),
-            [](const Move& m) { return !m.is_capture(); }),
-        moves.end());
+    std::vector<Move> captures = board.get_legal_captures();
 
-    order_moves(moves, board);
+    order_moves(captures, board);
 
-    for (auto& m : moves) {
+    for (auto& m : captures) {
         board.move(m);
         int score = -quiescence_search(board, -beta, -alpha, nodes);
         board.undo_move(m);

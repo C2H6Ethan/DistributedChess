@@ -1002,6 +1002,24 @@ std::vector<Move> Board::get_legal_moves() {
     return legal;
 }
 
+std::vector<Move> Board::get_legal_captures() {
+    Move moves[256];
+    Move* end = generate_pseudo_legal_moves(moves);
+    std::vector<Move> legal;
+
+    for (Move* m = moves; m < end; ++m) {
+        if (!m->is_capture()) continue;
+        move(*m);
+        Color us = (player_to_move == WHITE) ? BLACK : WHITE;
+        if (!is_in_check(us)) {
+            legal.push_back(*m);
+        }
+        undo_move(*m);
+    }
+
+    return legal;
+}
+
 bool Board::is_insufficient_material() {
     int white_count = __builtin_popcountll(occupancy[WHITE]);
     int black_count = __builtin_popcountll(occupancy[BLACK]);
