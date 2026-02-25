@@ -30,7 +30,8 @@ func initDB(dsn string) *sql.DB {
 			current_fen TEXT NOT NULL DEFAULT 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
 			status      TEXT NOT NULL DEFAULT 'active',
 			white_hints INTEGER NOT NULL DEFAULT 3,
-			black_hints INTEGER NOT NULL DEFAULT 3
+			black_hints INTEGER NOT NULL DEFAULT 3,
+			bot_depth   INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS moves (
@@ -44,6 +45,18 @@ func initDB(dsn string) *sql.DB {
 	`)
 	if err != nil {
 		log.Fatalf("db migrate: %v", err)
+	}
+
+	// Seed the Engine bot user at id=0. Password is intentionally unloginnable.
+	_, err = db.Exec(`INSERT INTO users (id, username, password_hash) VALUES (0, 'Engine', 'NO_LOGIN') ON CONFLICT DO NOTHING`)
+	if err != nil {
+		log.Fatalf("db seed engine user: %v", err)
+	}
+
+	// Idempotent column addition for existing deployments.
+	_, err = db.Exec(`ALTER TABLE games ADD COLUMN IF NOT EXISTS bot_depth INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		log.Fatalf("db migrate bot_depth: %v", err)
 	}
 
 	return db

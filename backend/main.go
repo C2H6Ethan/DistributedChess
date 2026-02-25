@@ -18,6 +18,7 @@ func main() {
 
 	// Protected routes — JWT required
 	mux.Handle("POST /game", jwtMiddleware(createGameHandler(db)))
+	mux.Handle("POST /game/bot", jwtMiddleware(createBotGameHandler(db)))
 	mux.Handle("POST /move", jwtMiddleware(moveHandler(db)))
 	mux.Handle("GET /users", jwtMiddleware(searchUsersHandler(db)))
 	mux.Handle("GET /game/{id}", jwtMiddleware(getGameHandler(db)))

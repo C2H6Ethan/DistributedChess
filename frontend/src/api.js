@@ -29,13 +29,14 @@ async function req(method, path, body, { timeout = 10000 } = {}) {
 }
 
 export const api = {
-  register:    (username, password)             => req('POST', '/register', { username, password }),
-  login:       (username, password)             => req('POST', '/login',    { username, password }),
-  searchUsers: (q)                              => req('GET',  `/users?q=${encodeURIComponent(q)}`),
-  createGame:  (white_username, black_username) => req('POST', '/game',     { white_username, black_username }),
-  getGame:     (id)                             => req('GET',  `/game/${id}`),
-  myGames:     ()                               => req('GET',  '/games'),
-  move:        (game_id, uci_move)              => req('POST', '/move',     { game_id, uci_move }),
-  getMoves:    (id)                             => req('GET',  `/game/${id}/moves`),
-  getHint:     (id)                             => req('GET',  `/game/${id}/hint`, undefined, { timeout: 120000 }),
+  register:      (username, password)             => req('POST', '/register',  { username, password }),
+  login:         (username, password)             => req('POST', '/login',     { username, password }),
+  searchUsers:   (q)                              => req('GET',  `/users?q=${encodeURIComponent(q)}`),
+  createGame:    (white_username, black_username) => req('POST', '/game',      { white_username, black_username }),
+  createBotGame: (difficulty)                     => req('POST', '/game/bot',  { difficulty }),
+  getGame:       (id)                             => req('GET',  `/game/${id}`),
+  myGames:       ()                               => req('GET',  '/games'),
+  move:          (game_id, uci_move)              => req('POST', '/move',      { game_id, uci_move }),
+  getMoves:      (id)                             => req('GET',  `/game/${id}/moves`),
+  getHint:       (id)                             => req('GET',  `/game/${id}/hint`, undefined, { timeout: 120000 }),
 }

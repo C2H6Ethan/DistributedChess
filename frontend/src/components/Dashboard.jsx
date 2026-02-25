@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { Star } from 'lucide-react'
 import { api } from '../api'
 
 function GameRow({ game, user, onResume }) {
@@ -43,6 +44,8 @@ function GameRow({ game, user, onResume }) {
   )
 }
 
+const DIFFICULTY_LABELS = { 1: 'Easy', 2: 'Novice', 3: 'Intermediate', 4: 'Master' }
+
 export default function Dashboard({ user, onStartGame, onLogout }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
@@ -50,6 +53,8 @@ export default function Dashboard({ user, onStartGame, onLogout }) {
   const [showDropdown, setShowDropdown] = useState(false)
   const [myGames, setMyGames] = useState([])
   const [challenging, setChallenging] = useState(null)
+  const [botDifficulty, setBotDifficulty] = useState(0)
+  const [startingBot, setStartingBot] = useState(false)
   const inputRef = useRef(null)
   const dropdownRef = useRef(null)
 
@@ -113,6 +118,20 @@ export default function Dashboard({ user, onStartGame, onLogout }) {
     }
   }
 
+  async function startBotGame() {
+    if (!botDifficulty) return
+    setStartingBot(true)
+    try {
+      const { game_id } = await api.createBotGame(botDifficulty)
+      const game = await api.getGame(game_id)
+      onStartGame(game)
+    } catch (err) {
+      alert(err.message)
+    } finally {
+      setStartingBot(false)
+    }
+  }
+
   async function resume(game) {
     try {
       const fresh = await api.getGame(game.id)
@@ -142,6 +161,47 @@ export default function Dashboard({ user, onStartGame, onLogout }) {
       </header>
 
       <main className="flex-1 max-w-lg mx-auto w-full px-6 py-10 space-y-10">
+
+        {/* ── Player vs Machine ─────────────────────────────────────── */}
+        <section>
+          <h2 className="text-xs font-medium uppercase tracking-widest text-zinc-500 mb-3">
+            Player vs Machine
+          </h2>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 space-y-4">
+            {/* Star selector */}
+            <div className="flex items-center gap-2">
+              {[1, 2, 3, 4].map(n => (
+                <button
+                  key={n}
+                  onClick={() => setBotDifficulty(n)}
+                  className="focus:outline-none transition-transform hover:scale-110"
+                  aria-label={`Difficulty ${n}`}
+                >
+                  <Star
+                    size={24}
+                    className={n <= botDifficulty ? 'text-yellow-400' : 'text-zinc-700'}
+                    fill={n <= botDifficulty ? 'currentColor' : 'none'}
+                    strokeWidth={1.5}
+                  />
+                </button>
+              ))}
+            </div>
+
+            {/* Difficulty label */}
+            <p className={`text-sm font-medium transition-opacity ${botDifficulty ? 'text-zinc-300 opacity-100' : 'opacity-0 select-none'}`}>
+              {DIFFICULTY_LABELS[botDifficulty] ?? ''}
+            </p>
+
+            {/* Action button */}
+            <button
+              onClick={startBotGame}
+              disabled={!botDifficulty || startingBot}
+              className="w-full bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg px-4 py-2.5 transition-colors"
+            >
+              {startingBot ? 'Initializing…' : 'Initialize Engine'}
+            </button>
+          </div>
+        </section>
 
         {/* ── New game ───────────────────────────────────────────────── */}
         <section>

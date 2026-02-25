@@ -12,6 +12,15 @@ import (
 	"time"
 )
 
+// botDepthByDifficulty maps the 1-4 star difficulty selector to C++ search depths.
+// Easy (1) = very shallow for fast, weak play. Master (4) = full depth, strong play.
+var botDepthByDifficulty = map[int]int{
+	1: 2, // Easy        — instant, random-ish
+	2: 4, // Novice      — plays reasonable moves
+	3: 6, // Intermediate — solid tactical play
+	4: 8, // Master      — strong, slow
+}
+
 // Game is the full game row joined with player usernames.
 type Game struct {
 	ID            int    `json:"id"`
@@ -205,6 +214,40 @@ func createGameHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// createBotGameHandler starts a new game against the Engine bot.
+// POST /game/bot  {"difficulty": 1-4}
+func createBotGameHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r)
+
+		var body struct {
+			Difficulty int `json:"difficulty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Difficulty < 1 || body.Difficulty > 4 {
+			jsonError(w, "difficulty must be 1-4", http.StatusBadRequest)
+			return
+		}
+
+		depth, ok := botDepthByDifficulty[body.Difficulty]
+		if !ok {
+			jsonError(w, "invalid difficulty", http.StatusBadRequest)
+			return
+		}
+
+		var gameID int
+		err := db.QueryRow(
+			`INSERT INTO games (white_id, black_id, bot_depth) VALUES ($1, 0, $2) RETURNING id`,
+			claims.UserID, depth,
+		).Scan(&gameID)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]int{"game_id": gameID})
+	}
+}
+
 // moveHandler validates the move, enforces turn order, forwards to the C++
 // engine, and persists the new FEN on success.
 // POST /move  {"game_id":1,"uci_move":"e2e4"}
@@ -222,12 +265,12 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Load game state.
-		var whiteID, blackID int
+		var whiteID, blackID, botDepth int
 		var currentFEN, status string
 		err := db.QueryRow(
-			`SELECT white_id, black_id, current_fen, status FROM games WHERE id = $1`,
+			`SELECT white_id, black_id, current_fen, status, bot_depth FROM games WHERE id = $1`,
 			body.GameID,
-		).Scan(&whiteID, &blackID, &currentFEN, &status)
+		).Scan(&whiteID, &blackID, &currentFEN, &status, &botDepth)
 		if err == sql.ErrNoRows {
 			jsonError(w, "game not found", http.StatusNotFound)
 			return
@@ -332,12 +375,87 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// If this is a bot game and the game is still active, fire the engine's reply.
+		opponentID := blackID
+		if claims.UserID == blackID {
+			opponentID = whiteID
+		}
+		if opponentID == 0 && newStatus == "active" {
+			go fireBotMove(db, body.GameID, engineResp.NewFEN, botDepth)
+		}
+
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":     engineResp.Status,
 			"game_state": engineResp.GameState,
 			"new_fen":    engineResp.NewFEN,
 		})
 	}
+}
+
+// fireBotMove calls the C++ engine to pick the best move, then persists it.
+// Runs in a goroutine so it doesn't block the human player's HTTP response.
+func fireBotMove(db *sql.DB, gameID int, fen string, depth int) {
+	searchPayload, _ := json.Marshal(map[string]any{
+		"fen":   fen,
+		"depth": depth,
+	})
+	searchClient := &http.Client{Timeout: 120 * time.Second}
+	resp, err := searchClient.Post(engineURL()+"/search", "application/json", bytes.NewReader(searchPayload))
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var searchResp struct {
+		BestMove string `json:"best_move"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil || searchResp.BestMove == "" {
+		return
+	}
+
+	// Validate and apply the bot's chosen move through the engine.
+	movePayload, _ := json.Marshal(map[string]string{
+		"fen":      fen,
+		"uci_move": searchResp.BestMove,
+	})
+	mresp, err := engineClient.Post(engineURL()+"/move", "application/json", bytes.NewReader(movePayload))
+	if err != nil {
+		return
+	}
+	defer mresp.Body.Close()
+
+	var engineResp struct {
+		Status    string `json:"status"`
+		GameState string `json:"game_state"`
+		NewFEN    string `json:"new_fen"`
+	}
+	if err := json.NewDecoder(mresp.Body).Decode(&engineResp); err != nil || engineResp.Status != "VALID" {
+		return
+	}
+
+	newStatus := "active"
+	switch engineResp.GameState {
+	case "CHECKMATE", "STALEMATE", "DRAW_50_MOVE", "DRAW_INSUFFICIENT":
+		newStatus = "finished"
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var ply int
+	if err = tx.QueryRow(`SELECT COUNT(*) + 1 FROM moves WHERE game_id = $1`, gameID).Scan(&ply); err != nil {
+		return
+	}
+	if _, err = tx.Exec(`UPDATE games SET current_fen = $1, status = $2 WHERE id = $3`, engineResp.NewFEN, newStatus, gameID); err != nil {
+		return
+	}
+	if _, err = tx.Exec(`INSERT INTO moves (game_id, ply, uci, fen_after) VALUES ($1, $2, $3, $4)`, gameID, ply, searchResp.BestMove, engineResp.NewFEN); err != nil {
+		return
+	}
+	_ = tx.Commit()
 }
 
 // hintHandler asks the C++ engine for the best move at depth 7.
