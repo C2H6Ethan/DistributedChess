@@ -1,5 +1,6 @@
 #include "Search.h"
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
@@ -449,6 +450,11 @@ static int quiescence_search(Board& board, int alpha, int beta, SearchContext* c
 
 static int negamax(Board& board, int depth, int alpha, int beta,
                    SearchContext* ctx, int ply, bool no_null = false, int noise = 0) {
+    // Graceful abort when time limit expires.
+    if (ctx->stop_flag.load(std::memory_order_relaxed)) return alpha;
+    ctx->check_time();
+    if (ctx->stop_flag.load(std::memory_order_relaxed)) return alpha;
+
     bool in_check = board.is_in_check(board.get_player_to_move());
 
     // Check extension: don't enter QS while in check.
@@ -601,11 +607,12 @@ static int negamax(Board& board, int depth, int alpha, int beta,
 
 // ============= Top-level Search (Iterative Deepening) =============
 
-SearchResult search(Board& board, int depth, int noise) {
+SearchResult search(Board& board, int depth, int noise, int time_ms, DepthCallback on_depth) {
     SearchResult result;
     result.best_move = Move();
     result.score = INT_MIN;
     result.nodes = 0;
+    result.depth_completed = 0;
 
     Move moves[256];
     int count = board.get_legal_moves(moves);
@@ -624,6 +631,10 @@ SearchResult search(Board& board, int depth, int noise) {
     ctx.path_hashes[0] = board.get_hash();
 
     // TT persists across calls (static array) — no clearing needed
+
+    ctx.start_time = std::chrono::steady_clock::now();
+    ctx.time_ms = time_ms;
+    bool timed = time_ms > 0;
 
     // Iterative deepening with clean PVS on every iteration.
     // Noise is threaded into evaluate() at leaf nodes — no root perturbation needed.
@@ -664,6 +675,8 @@ SearchResult search(Board& board, int depth, int noise) {
 
             board.undo_move(moves[i]);
 
+            if (ctx.stop_flag.load(std::memory_order_relaxed)) break;
+
             if (score > best_score) {
                 best_score = score;
                 best_move = moves[i];
@@ -671,12 +684,26 @@ SearchResult search(Board& board, int depth, int noise) {
             if (score > alpha) alpha = score;
         }
 
-        result.best_move = best_move;
-        result.score = best_score;
+        // Only update result from fully completed (or at least partially valid) iterations.
+        if (!ctx.stop_flag.load(std::memory_order_relaxed)) {
+            result.best_move = best_move;
+            result.score = best_score;
+            result.depth_completed = d;
+
+            // Store root position in TT
+            tt_store(hash, best_score, d, best_move, TT_EXACT, 0);
+
+            if (on_depth) {
+                on_depth(d, best_move.to_uci(), best_score, result.nodes);
+            }
+        }
         result.nodes += ctx.nodes;
 
-        // Store root position in TT
-        tt_store(hash, best_score, d, best_move, TT_EXACT, 0);
+        // Check time after each completed depth iteration.
+        if (timed) {
+            ctx.check_time();
+            if (ctx.stop_flag.load(std::memory_order_relaxed)) break;
+        }
     }
 
     return result;

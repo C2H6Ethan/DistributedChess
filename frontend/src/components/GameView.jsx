@@ -120,12 +120,14 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
   )
   const [hintLoading, setHintLoading] = useState(false)
   const [hintSquares, setHintSquares] = useState(null) // { from, to }
+  const [searchProgress, setSearchProgress] = useState(null) // { depth, score, nodes }
 
   const prevMovesLen = useRef(0)
 
   const isWhite  = game.white_id === user.id
   const myColor  = isWhite ? 'w' : 'b'
-  const opponent = isWhite ? game.black_username : game.white_username
+  const isBotGame = game.black_id === 0
+  const opponent = isBotGame ? 'Engine' : (isWhite ? game.black_username : game.white_username)
 
   // displayIdx: how many moves deep we are viewing (0 = before any moves)
   const displayIdx  = viewIndex ?? moves.length
@@ -166,6 +168,22 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
     }, 2000)
     return () => clearInterval(timer)
   }, [game.id, isFinished, isMyTurn]) // eslint-disable-line
+
+  // ── Bot thinking polling ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (isMyTurn || isFinished || !isBotGame) return
+    const timer = setInterval(async () => {
+      try {
+        const data = await api.getBotThinking(game.id)
+        if (data.thinking) {
+          setSearchProgress({ depth: data.depth, score: data.score, nodes: data.nodes })
+        } else {
+          setSearchProgress(null)
+        }
+      } catch { /* ignore */ }
+    }, 500)
+    return () => { clearInterval(timer); setSearchProgress(null) }
+  }, [game.id, isMyTurn, isFinished, isBotGame]) // eslint-disable-line
 
   // ── Clear stale selection / hint when the board changes ─────────────────
   useEffect(() => { setMoveFrom(null); setHintSquares(null) }, [displayIdx])
@@ -393,6 +411,21 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
             </p>
           </div>
 
+          {/* Live search progress */}
+          {searchProgress && searchProgress.depth > 0 && (
+            <div className="text-xs text-zinc-400 font-mono">
+              Depth {searchProgress.depth}
+              {' · '}
+              {searchProgress.score > 0 ? '+' : ''}{(searchProgress.score / 100).toFixed(2)}
+              {' · '}
+              {searchProgress.nodes >= 1_000_000
+                ? (searchProgress.nodes / 1_000_000).toFixed(1) + 'M'
+                : searchProgress.nodes >= 1_000
+                  ? (searchProgress.nodes / 1_000).toFixed(1) + 'K'
+                  : searchProgress.nodes} nodes
+            </div>
+          )}
+
           {/* Hint button */}
           {isMyTurn && !isInHistory && hintsLeft > 0 && (
             <button
@@ -400,16 +433,24 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
                 if (hintLoading) return
                 setHintLoading(true)
                 setHintSquares(null)
+                setSearchProgress(null)
                 try {
-                  const data = await api.getHint(game.id)
-                  const from = data.best_move.slice(0, 2)
-                  const to   = data.best_move.slice(2, 4)
-                  setHintSquares({ from, to })
-                  setHintsLeft(data.hints_left)
+                  const result = await api.streamHint(game.id, (ev) => {
+                    if (!ev.done) {
+                      setSearchProgress({ depth: ev.depth, score: ev.score, nodes: ev.nodes })
+                    }
+                  })
+                  if (result) {
+                    const from = result.best_move.slice(0, 2)
+                    const to   = result.best_move.slice(2, 4)
+                    setHintSquares({ from, to })
+                    if (result.hints_left !== undefined) setHintsLeft(result.hints_left)
+                  }
                 } catch (err) {
                   setError(err.message)
                 } finally {
                   setHintLoading(false)
+                  setSearchProgress(null)
                 }
               }}
               disabled={hintLoading}

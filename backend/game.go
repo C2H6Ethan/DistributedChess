@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -9,20 +10,34 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
+// BotProgress tracks the current search progress for a bot move in flight.
+type BotProgress struct {
+	Depth    int    `json:"depth"`
+	BestMove string `json:"best_move"`
+	Score    int    `json:"score"`
+	Nodes    int    `json:"nodes"`
+	mu       sync.Mutex
+}
+
+// botThinking stores in-flight bot search progress keyed by game ID.
+var botThinking sync.Map // map[int]*BotProgress
+
 // BotConfig holds the search parameters for a given difficulty level.
 type BotConfig struct {
-	Depth int
-	Noise int // centipawn evaluation noise; 0 = deterministic
+	Depth  int
+	Noise  int // centipawn evaluation noise; 0 = deterministic
+	TimeMs int // time limit in milliseconds; 0 = depth-only
 }
 
 // botConfigs maps the 1-3 star difficulty selector to C++ search parameters.
 var botConfigs = map[int]BotConfig{
-	1: {Depth: 4,  Noise: 400}, // Easy         — looks 2 human moves deep, misjudges by up to 4 pawns
-	2: {Depth: 6,  Noise: 150}, // Intermediate — calculates decently, makes positional blunders
-	3: {Depth: 12, Noise: 0},   // Master       — exploits expanded TT, 6 human moves deep
+	1: {Depth: 64, Noise: 400, TimeMs: 1000}, // Easy         — 1s search, misjudges by up to 4 pawns
+	2: {Depth: 64, Noise: 150, TimeMs: 3000}, // Intermediate — 3s search, makes positional blunders
+	3: {Depth: 64, Noise: 0,   TimeMs: 5000}, // Master       — 5s search, full strength
 }
 
 // Game is the full game row joined with player usernames.
@@ -240,8 +255,8 @@ func createBotGameHandler(db *sql.DB) http.HandlerFunc {
 
 		var gameID int
 		err := db.QueryRow(
-			`INSERT INTO games (white_id, black_id, bot_depth, bot_noise) VALUES ($1, 0, $2, $3) RETURNING id`,
-			claims.UserID, cfg.Depth, cfg.Noise,
+			`INSERT INTO games (white_id, black_id, bot_depth, bot_noise, bot_time_ms) VALUES ($1, 0, $2, $3, $4) RETURNING id`,
+			claims.UserID, cfg.Depth, cfg.Noise, cfg.TimeMs,
 		).Scan(&gameID)
 		if err != nil {
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -269,12 +284,12 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Load game state.
-		var whiteID, blackID, botDepth, botNoise int
+		var whiteID, blackID, botDepth, botNoise, botTimeMs int
 		var currentFEN, status string
 		err := db.QueryRow(
-			`SELECT white_id, black_id, current_fen, status, bot_depth, bot_noise FROM games WHERE id = $1`,
+			`SELECT white_id, black_id, current_fen, status, bot_depth, bot_noise, bot_time_ms FROM games WHERE id = $1`,
 			body.GameID,
-		).Scan(&whiteID, &blackID, &currentFEN, &status, &botDepth, &botNoise)
+		).Scan(&whiteID, &blackID, &currentFEN, &status, &botDepth, &botNoise, &botTimeMs)
 		if err == sql.ErrNoRows {
 			jsonError(w, "game not found", http.StatusNotFound)
 			return
@@ -385,7 +400,7 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			opponentID = whiteID
 		}
 		if opponentID == 0 && newStatus == "active" {
-			go fireBotMove(db, body.GameID, engineResp.NewFEN, botDepth, botNoise)
+			go fireBotMove(db, body.GameID, engineResp.NewFEN, botDepth, botNoise, botTimeMs)
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -396,32 +411,68 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// fireBotMove calls the C++ engine to pick the best move, then persists it.
+// fireBotMove calls the C++ engine's streaming endpoint to pick the best move,
+// updates botThinking progress as each depth completes, then persists the result.
 // Runs in a goroutine so it doesn't block the human player's HTTP response.
-func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int) {
-	searchPayload, _ := json.Marshal(map[string]any{
+func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int, timeMs int) {
+	progress := &BotProgress{}
+	botThinking.Store(gameID, progress)
+	defer botThinking.Delete(gameID)
+
+	payload := map[string]any{
 		"fen":   fen,
 		"depth": depth,
 		"noise": noise,
-	})
+	}
+	if timeMs > 0 {
+		payload["time_ms"] = timeMs
+	}
+	searchPayload, _ := json.Marshal(payload)
 	searchClient := &http.Client{Timeout: 120 * time.Second}
-	resp, err := searchClient.Post(engineURL()+"/search", "application/json", bytes.NewReader(searchPayload))
+	resp, err := searchClient.Post(engineURL()+"/search-stream", "application/json", bytes.NewReader(searchPayload))
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
 
-	var searchResp struct {
-		BestMove string `json:"best_move"`
+	// Read SSE events and track the latest best move.
+	var bestMove string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		jsonStr := strings.TrimPrefix(line, "data: ")
+		var ev struct {
+			Depth    int    `json:"depth"`
+			BestMove string `json:"best_move"`
+			Score    int    `json:"score"`
+			Nodes    int    `json:"nodes"`
+			Done     bool   `json:"done"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &ev); err != nil {
+			continue
+		}
+		progress.mu.Lock()
+		progress.Depth = ev.Depth
+		progress.BestMove = ev.BestMove
+		progress.Score = ev.Score
+		progress.Nodes = ev.Nodes
+		progress.mu.Unlock()
+		if ev.Done {
+			bestMove = ev.BestMove
+		}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil || searchResp.BestMove == "" {
+
+	if bestMove == "" {
 		return
 	}
 
 	// Validate and apply the bot's chosen move through the engine.
 	movePayload, _ := json.Marshal(map[string]string{
 		"fen":      fen,
-		"uci_move": searchResp.BestMove,
+		"uci_move": bestMove,
 	})
 	mresp, err := engineClient.Post(engineURL()+"/move", "application/json", bytes.NewReader(movePayload))
 	if err != nil {
@@ -457,15 +508,16 @@ func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int) {
 	if _, err = tx.Exec(`UPDATE games SET current_fen = $1, status = $2 WHERE id = $3`, engineResp.NewFEN, newStatus, gameID); err != nil {
 		return
 	}
-	if _, err = tx.Exec(`INSERT INTO moves (game_id, ply, uci, fen_after) VALUES ($1, $2, $3, $4)`, gameID, ply, searchResp.BestMove, engineResp.NewFEN); err != nil {
+	if _, err = tx.Exec(`INSERT INTO moves (game_id, ply, uci, fen_after) VALUES ($1, $2, $3, $4)`, gameID, ply, bestMove, engineResp.NewFEN); err != nil {
 		return
 	}
 	_ = tx.Commit()
 }
 
-// hintHandler asks the C++ engine for the best move at depth 7.
+// hintStreamHandler streams SSE events from the engine as each search depth
+// completes, allowing the frontend to show live depth/score progress.
 // GET /game/{id}/hint
-func hintHandler(db *sql.DB) http.HandlerFunc {
+func hintStreamHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := claimsFromCtx(r)
 		id, err := strconv.Atoi(r.PathValue("id"))
@@ -522,48 +574,119 @@ func hintHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Set SSE headers.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			jsonError(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
 		payload, _ := json.Marshal(map[string]any{
-			"fen":   currentFEN,
-			"depth": 12,
+			"fen":     currentFEN,
+			"depth":   64,
+			"time_ms": 5000,
 		})
-		// Use a long timeout — search can be slow on unoptimised engines.
 		searchClient := &http.Client{Timeout: 120 * time.Second}
-		resp, err := searchClient.Post(engineURL()+"/search", "application/json", bytes.NewReader(payload))
+		resp, err := searchClient.Post(engineURL()+"/search-stream", "application/json", bytes.NewReader(payload))
 		if err != nil {
-			jsonError(w, "engine unreachable", http.StatusBadGateway)
+			// Already sent SSE headers, so write error as SSE event.
+			fmt.Fprintf(w, "data: {\"error\":\"engine unreachable\"}\n\n")
+			flusher.Flush()
 			return
 		}
 		defer resp.Body.Close()
 
-		var engineResp struct {
-			BestMove string `json:"best_move"`
-			Score    int    `json:"score"`
-			Error    string `json:"error"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&engineResp); err != nil {
-			jsonError(w, "invalid engine response", http.StatusBadGateway)
-			return
-		}
 		if resp.StatusCode != http.StatusOK {
-			jsonError(w, "engine error: "+engineResp.Error, http.StatusBadGateway)
+			fmt.Fprintf(w, "data: {\"error\":\"engine error\"}\n\n")
+			flusher.Flush()
 			return
 		}
 
-		// Decrement hints only after a successful engine response.
-		col := "black_hints"
-		if isCallerWhite {
-			col = "white_hints"
-		}
-		_, _ = db.Exec(
-			fmt.Sprintf(`UPDATE games SET %s = %s - 1 WHERE id = $1 AND %s > 0`, col, col, col),
-			id,
-		)
+		// Relay SSE events from engine to client.
+		scanner := bufio.NewScanner(resp.Body)
+		hintsDecremented := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
 
-		writeJSON(w, http.StatusOK, map[string]any{
-			"best_move":  engineResp.BestMove,
-			"score":      engineResp.Score,
-			"hints_left": remaining - 1,
-		})
+			// Check for done event to decrement hints and add hints_left field.
+			jsonStr := strings.TrimPrefix(line, "data: ")
+			var ev map[string]any
+			if err := json.Unmarshal([]byte(jsonStr), &ev); err == nil {
+				if done, _ := ev["done"].(bool); done && !hintsDecremented {
+					hintsDecremented = true
+					col := "black_hints"
+					if isCallerWhite {
+						col = "white_hints"
+					}
+					_, _ = db.Exec(
+						fmt.Sprintf(`UPDATE games SET %s = %s - 1 WHERE id = $1 AND %s > 0`, col, col, col),
+						id,
+					)
+					ev["hints_left"] = remaining - 1
+					modified, _ := json.Marshal(ev)
+					fmt.Fprintf(w, "data: %s\n\n", modified)
+					flusher.Flush()
+					continue
+				}
+			}
+
+			fmt.Fprintf(w, "%s\n\n", line)
+			flusher.Flush()
+		}
+	}
+}
+
+// botThinkingHandler returns the current search progress for a bot move.
+// GET /game/{id}/bot-thinking
+func botThinkingHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r)
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			jsonError(w, "invalid game id", http.StatusBadRequest)
+			return
+		}
+
+		// Participant check.
+		var whiteID, blackID int
+		err = db.QueryRow(`SELECT white_id, black_id FROM games WHERE id = $1`, id).Scan(&whiteID, &blackID)
+		if err == sql.ErrNoRows {
+			jsonError(w, "game not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if whiteID != claims.UserID && blackID != claims.UserID {
+			jsonError(w, "not a participant", http.StatusForbidden)
+			return
+		}
+
+		val, ok := botThinking.Load(id)
+		if !ok {
+			writeJSON(w, http.StatusOK, map[string]any{"thinking": false})
+			return
+		}
+		p := val.(*BotProgress)
+		p.mu.Lock()
+		result := map[string]any{
+			"thinking":  true,
+			"depth":     p.Depth,
+			"best_move": p.BestMove,
+			"score":     p.Score,
+			"nodes":     p.Nodes,
+		}
+		p.mu.Unlock()
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 

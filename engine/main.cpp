@@ -60,10 +60,11 @@ int main() {
         std::string fen = body["fen"].get<std::string>();
         int depth = body.value("depth", 4);
         int noise = body.value("noise", 0);
+        int time_ms = body.value("time_ms", 0);
 
-        if (depth < 1 || depth > 20) {
+        if (depth < 1 || depth > 64) {
             res.status = 400;
-            res.set_content(R"({"error":"depth must be 1-20"})", "application/json");
+            res.set_content(R"({"error":"depth must be 1-64"})", "application/json");
             return;
         }
 
@@ -89,14 +90,101 @@ int main() {
             return;
         }
 
-        SearchResult result = search(board, depth, noise);
+        SearchResult result = search(board, depth, noise, time_ms);
 
         nlohmann::json resp;
         resp["best_move"] = result.best_move.to_uci();
         resp["score"] = result.score;
-        resp["depth"] = depth;
+        resp["depth"] = result.depth_completed;
         resp["nodes"] = result.nodes;
+        if (time_ms > 0) resp["time_ms"] = time_ms;
         res.set_content(resp.dump(), "application/json");
+    });
+
+    svr.Post("/search-stream", [](const httplib::Request& req, httplib::Response& res) {
+        nlohmann::json body;
+        try {
+            body = nlohmann::json::parse(req.body);
+        } catch (const nlohmann::json::parse_error&) {
+            res.status = 400;
+            res.set_content(R"({"error":"invalid JSON"})", "application/json");
+            return;
+        }
+
+        if (!body.contains("fen")) {
+            res.status = 400;
+            res.set_content(R"({"error":"missing fen"})", "application/json");
+            return;
+        }
+
+        // Capture request params before entering the content provider.
+        std::string fen = body["fen"].get<std::string>();
+        int depth   = body.value("depth", 4);
+        int noise   = body.value("noise", 0);
+        int time_ms = body.value("time_ms", 0);
+
+        if (depth < 1 || depth > 64) {
+            res.status = 400;
+            res.set_content(R"({"error":"depth must be 1-64"})", "application/json");
+            return;
+        }
+
+        // Opening book: send a single SSE event with book flag.
+        std::string book_move = book_lookup(fen);
+        if (!book_move.empty()) {
+            res.set_chunked_content_provider("text/event-stream",
+                [book_move](size_t /*offset*/, httplib::DataSink& sink) {
+                    nlohmann::json ev;
+                    ev["best_move"] = book_move;
+                    ev["score"] = 0;
+                    ev["depth"] = 0;
+                    ev["nodes"] = 0;
+                    ev["book"] = true;
+                    ev["done"] = true;
+                    std::string line = "data: " + ev.dump() + "\n\n";
+                    sink.write(line.data(), line.size());
+                    sink.done();
+                    return false;
+                });
+            return;
+        }
+
+        // Parse FEN and run search with streaming callback.
+        Board board;
+        try {
+            board.setup_with_fen(fen);
+        } catch (...) {
+            res.status = 400;
+            res.set_content(R"({"error":"failed to parse FEN"})", "application/json");
+            return;
+        }
+
+        res.set_chunked_content_provider("text/event-stream",
+            [board, depth, noise, time_ms](size_t /*offset*/, httplib::DataSink& sink) mutable {
+                DepthCallback cb = [&sink](int d, const std::string& best_move, int score, int nodes) {
+                    nlohmann::json ev;
+                    ev["depth"] = d;
+                    ev["best_move"] = best_move;
+                    ev["score"] = score;
+                    ev["nodes"] = nodes;
+                    std::string line = "data: " + ev.dump() + "\n\n";
+                    sink.write(line.data(), line.size());
+                };
+
+                SearchResult result = search(board, depth, noise, time_ms, cb);
+
+                // Final event with done flag.
+                nlohmann::json ev;
+                ev["depth"] = result.depth_completed;
+                ev["best_move"] = result.best_move.to_uci();
+                ev["score"] = result.score;
+                ev["nodes"] = result.nodes;
+                ev["done"] = true;
+                std::string line = "data: " + ev.dump() + "\n\n";
+                sink.write(line.data(), line.size());
+                sink.done();
+                return false;
+            });
     });
 
     std::cout << "Chess engine listening on 0.0.0.0:8081\n";

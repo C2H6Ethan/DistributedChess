@@ -23,7 +23,8 @@ func main() {
 	mux.Handle("GET /users", jwtMiddleware(searchUsersHandler(db)))
 	mux.Handle("GET /game/{id}", jwtMiddleware(getGameHandler(db)))
 	mux.Handle("GET /game/{id}/moves", jwtMiddleware(getGameMovesHandler(db)))
-	mux.Handle("GET /game/{id}/hint", jwtMiddleware(hintHandler(db)))
+	mux.Handle("GET /game/{id}/hint", jwtMiddleware(hintStreamHandler(db)))
+	mux.Handle("GET /game/{id}/bot-thinking", jwtMiddleware(botThinkingHandler(db)))
 	mux.Handle("GET /games", jwtMiddleware(myGamesHandler(db)))
 
 	addr := ":8080"
