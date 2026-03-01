@@ -149,19 +149,27 @@ int main() {
             return;
         }
 
-        // Parse FEN and run search with streaming callback.
-        Board board;
-        try {
-            board.setup_with_fen(fen);
-        } catch (...) {
-            res.status = 400;
-            res.set_content(R"({"error":"failed to parse FEN"})", "application/json");
-            return;
+        // Validate FEN before entering the content provider.
+        {
+            Board test_board;
+            try {
+                test_board.setup_with_fen(fen);
+            } catch (...) {
+                res.status = 400;
+                res.set_content(R"({"error":"failed to parse FEN"})", "application/json");
+                return;
+            }
         }
 
         res.set_chunked_content_provider("text/event-stream",
-            [board, depth, noise, time_ms](size_t /*offset*/, httplib::DataSink& sink) mutable {
-                DepthCallback cb = [&sink](int d, const std::string& best_move, int score, int nodes) {
+            [fen, depth, noise, time_ms](size_t /*offset*/, httplib::DataSink& sink) mutable {
+                Board board;
+                board.setup_with_fen(fen);
+                // Abort search early if the client disconnects.
+                std::atomic<bool> client_gone{false};
+
+                DepthCallback cb = [&sink, &client_gone](int d, const std::string& best_move, int score, int nodes) -> bool {
+                    if (!sink.is_writable()) { client_gone.store(true); return false; }
                     nlohmann::json ev;
                     ev["depth"] = d;
                     ev["best_move"] = best_move;
@@ -169,9 +177,12 @@ int main() {
                     ev["nodes"] = nodes;
                     std::string line = "data: " + ev.dump() + "\n\n";
                     sink.write(line.data(), line.size());
+                    return true;
                 };
 
                 SearchResult result = search(board, depth, noise, time_ms, cb);
+
+                if (client_gone.load() || !sink.is_writable()) return false;
 
                 // Final event with done flag.
                 nlohmann::json ev;

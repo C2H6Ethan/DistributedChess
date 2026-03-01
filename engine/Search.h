@@ -72,7 +72,8 @@ struct SearchResult {
 };
 
 // Callback invoked after each completed depth iteration during iterative deepening.
-using DepthCallback = std::function<void(int depth, const std::string& best_move, int score, int nodes)>;
+// Return true to continue searching, false to abort early.
+using DepthCallback = std::function<bool(int depth, const std::string& best_move, int score, int nodes)>;
 
 // Run iterative-deepening negamax with alpha-beta pruning from the given position.
 // noise > 0 perturbs leaf evaluations (centipawns) for weaker bots.

@@ -694,7 +694,7 @@ SearchResult search(Board& board, int depth, int noise, int time_ms, DepthCallba
             tt_store(hash, best_score, d, best_move, TT_EXACT, 0);
 
             if (on_depth) {
-                on_depth(d, best_move.to_uci(), best_score, result.nodes);
+                if (!on_depth(d, best_move.to_uci(), best_score, result.nodes)) break;
             }
         }
         result.nodes += ctx.nodes;
