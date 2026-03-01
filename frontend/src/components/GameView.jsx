@@ -170,15 +170,17 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
   }, [game.id, isFinished, isMyTurn]) // eslint-disable-line
 
   // ── Bot thinking polling ─────────────────────────────────────────────────
+  // Don't clear progress on individual "thinking:false" polls — with multiple
+  // backend replicas the sync.Map is per-process, so some polls miss.
+  // Clear stale progress on entry so we don't show previous search results.
   useEffect(() => {
     if (isMyTurn || isFinished || !isBotGame) return
+    setSearchProgress(null)
     const timer = setInterval(async () => {
       try {
         const data = await api.getBotThinking(game.id)
         if (data.thinking) {
           setSearchProgress({ depth: data.depth, score: data.score, nodes: data.nodes })
-        } else {
-          setSearchProgress(null)
         }
       } catch { /* ignore */ }
     }, 500)
@@ -416,7 +418,12 @@ export default function GameView({ user, game: initialGame, onGameChange, onLeav
             <div className="text-xs text-zinc-400 font-mono">
               Depth {searchProgress.depth}
               {' · '}
-              {searchProgress.score > 0 ? '+' : ''}{(searchProgress.score / 100).toFixed(2)}
+              {(() => {
+                const s = searchProgress.score
+                if (s > 90000) return `M${Math.ceil((100000 - s) / 2)}`
+                if (s < -90000) return `-M${Math.ceil((100000 + s) / 2)}`
+                return (s > 0 ? '+' : '') + (s / 100).toFixed(2)
+              })()}
               {' · '}
               {searchProgress.nodes >= 1_000_000
                 ? (searchProgress.nodes / 1_000_000).toFixed(1) + 'M'
