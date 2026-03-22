@@ -228,6 +228,7 @@ func createGameHandler(db *sql.DB) http.HandlerFunc {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		globalMetrics.recordDB(true)
 
 		writeJSON(w, http.StatusCreated, map[string]int{"game_id": gameID})
 	}
@@ -262,6 +263,7 @@ func createBotGameHandler(db *sql.DB) http.HandlerFunc {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		globalMetrics.recordDB(true)
 
 		writeJSON(w, http.StatusCreated, map[string]int{"game_id": gameID})
 	}
@@ -290,6 +292,7 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			`SELECT white_id, black_id, current_fen, status, bot_depth, bot_noise, bot_time_ms FROM games WHERE id = $1`,
 			body.GameID,
 		).Scan(&whiteID, &blackID, &currentFEN, &status, &botDepth, &botNoise, &botTimeMs)
+		globalMetrics.recordDB(false)
 		if err == sql.ErrNoRows {
 			jsonError(w, "game not found", http.StatusNotFound)
 			return
@@ -323,7 +326,9 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			"fen":      currentFEN,
 			"uci_move": body.UCIMove,
 		})
+		engineStart := time.Now()
 		resp, err := engineClient.Post(engineURL()+"/move", "application/json", bytes.NewReader(payload))
+		globalMetrics.recordEngine(time.Since(engineStart).Milliseconds(), err != nil)
 		if err != nil {
 			jsonError(w, "engine unreachable", http.StatusBadGateway)
 			return
@@ -393,6 +398,8 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		globalMetrics.recordDB(true) // UPDATE games
+		globalMetrics.recordDB(true) // INSERT moves
 
 		// If this is a bot game and the game is still active, fire the engine's reply.
 		opponentID := blackID
@@ -474,7 +481,9 @@ func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int, timeM
 		"fen":      fen,
 		"uci_move": bestMove,
 	})
+	botEngineStart := time.Now()
 	mresp, err := engineClient.Post(engineURL()+"/move", "application/json", bytes.NewReader(movePayload))
+	globalMetrics.recordEngine(time.Since(botEngineStart).Milliseconds(), err != nil)
 	if err != nil {
 		return
 	}

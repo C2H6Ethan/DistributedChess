@@ -85,4 +85,6 @@ export const api = {
   getHint:       (id)                             => req('GET',  `/game/${id}/hint`, undefined, { timeout: 120000 }),
   streamHint,
   getBotThinking: (id)                            => req('GET',  `/game/${id}/bot-thinking`),
+  // Unauthenticated — each call may hit a different replica via the load balancer.
+  stats: () => fetch(BASE + '/stats', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
 }

@@ -3,6 +3,7 @@ import { setToken } from './api'
 import Auth from './components/Auth'
 import Dashboard from './components/Dashboard'
 import GameView from './components/GameView'
+import InfraDashboard from './components/InfraDashboard'
 
 // Rehydrate session from localStorage on first render.
 function loadStoredUser() {
@@ -22,8 +23,9 @@ function loadStoredUser() {
 }
 
 export default function App() {
-  const [user, setUser] = useState(loadStoredUser)
-  const [game, setGame] = useState(null)
+  const [user,  setUser]  = useState(loadStoredUser)
+  const [game,  setGame]  = useState(null)
+  const [infra, setInfra] = useState(false)
 
   function handleAuth(userData) {
     setUser(userData)
@@ -34,9 +36,12 @@ export default function App() {
     setToken(null)
     setUser(null)
     setGame(null)
+    setInfra(false)
   }
 
   if (!user) return <Auth onAuth={handleAuth} />
+
+  if (infra) return <InfraDashboard onLeave={() => setInfra(false)} />
 
   if (game) {
     return (
@@ -54,6 +59,7 @@ export default function App() {
       user={user}
       onStartGame={setGame}
       onLogout={handleLogout}
+      onInfra={() => setInfra(true)}
     />
   )
 }

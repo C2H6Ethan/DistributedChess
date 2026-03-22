@@ -46,7 +46,7 @@ function GameRow({ game, user, onResume }) {
 
 const DIFFICULTY_LABELS = { 1: 'Easy', 2: 'Intermediate', 3: 'Master' }
 
-export default function Dashboard({ user, onStartGame, onLogout }) {
+export default function Dashboard({ user, onStartGame, onLogout, onInfra }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [searching, setSearching] = useState(false)
@@ -151,6 +151,15 @@ export default function Dashboard({ user, onStartGame, onLogout }) {
         <span className="font-semibold text-zinc-100 tracking-tight">DistributedChess</span>
         <div className="flex items-center gap-4">
           <span className="text-zinc-400 text-sm">{user.username}</span>
+          <button
+            onClick={onInfra}
+            className="text-zinc-500 hover:text-zinc-300 text-sm transition-colors flex items-center gap-1.5"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-13.5 0v-1.5m13.5 1.5v-1.5m0 0a3 3 0 01-3-3m3 3H5.25m13.5-3H5.25m0 0a3 3 0 01-3-3m16.5 3a3 3 0 01-3-3m-10.5 3V9.75m10.5 0V9.75m0 0a3 3 0 00-3-3H8.25a3 3 0 00-3 3" />
+            </svg>
+            Infrastructure
+          </button>
           <button
             onClick={onLogout}
             className="text-zinc-500 hover:text-zinc-300 text-sm transition-colors"

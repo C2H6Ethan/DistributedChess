@@ -10,6 +10,10 @@ int main() {
     std::srand(static_cast<unsigned>(std::time(nullptr)));
 
     httplib::Server svr;
+    // Default thread pool is max(8, hardware_concurrency-1) which queues under
+    // burst load. 32 threads per replica handles concurrent move validation
+    // without timeouts at high VU counts.
+    svr.new_task_queue = [] { return new httplib::ThreadPool(32); };
 
     svr.Post("/move", [](const httplib::Request& req, httplib::Response& res) {
         nlohmann::json body;
