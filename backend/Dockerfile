@@ -1,5 +1,5 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o referee .
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine:3.23
 
 # ca-certificates is needed if the service ever makes outbound TLS calls.
 RUN apk add --no-cache ca-certificates

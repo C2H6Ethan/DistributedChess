@@ -58,7 +58,6 @@ func parseToken(tokenStr string) (*Claims, error) {
 	return claims, nil
 }
 
-// issueRefreshToken generates a random token, stores its hash in DB, returns the raw token.
 func issueRefreshToken(db *sql.DB, userID int) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
