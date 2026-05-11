@@ -1,13 +1,59 @@
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <cstdlib>
 #include <ctime>
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include <unistd.h>
 #include "httplib.h"
 #include "nlohmann/json.hpp"
 #include "Validator.h"
 #include "Search.h"
 
+// ── Engine-wide metrics ───────────────────────────────────────────────────────
+static std::atomic<int>    g_searches_in_flight{0};
+// cpu_percent stored as integer * 10 (e.g. 753 = 75.3%) for atomic portability
+static std::atomic<int>    g_cpu_percent_x10{0};
+
+static long long read_cpu_ticks() {
+    std::ifstream f("/proc/self/stat");
+    if (!f.is_open()) return -1;
+    std::string line;
+    std::getline(f, line);
+    std::istringstream ss(line);
+    std::string tok;
+    // fields are 1-indexed; utime=14, stime=15
+    for (int i = 1; i <= 13; i++) ss >> tok;
+    long long utime = 0, stime = 0;
+    ss >> utime >> stime;
+    return utime + stime;
+}
+
+static void track_cpu() {
+    long long prev = read_cpu_ticks();
+    auto prev_t = std::chrono::steady_clock::now();
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        long long cur = read_cpu_ticks();
+        auto cur_t    = std::chrono::steady_clock::now();
+        if (prev >= 0 && cur >= 0) {
+            double elapsed = std::chrono::duration<double>(cur_t - prev_t).count();
+            int cores = std::max(1, (int)std::thread::hardware_concurrency());
+            double pct = (cur - prev) / (elapsed * 100.0 * cores) * 100.0;
+            if (pct > 100.0) pct = 100.0;
+            if (pct < 0.0)   pct = 0.0;
+            g_cpu_percent_x10.store(static_cast<int>(pct * 10));
+        }
+        prev = cur;
+        prev_t = cur_t;
+    }
+}
+
 int main() {
     std::srand(static_cast<unsigned>(std::time(nullptr)));
+    std::thread(track_cpu).detach();
 
     httplib::Server svr;
     // Default thread pool is max(8, hardware_concurrency-1) which queues under
@@ -43,6 +89,17 @@ int main() {
         }
 
         res.set_content(result, "application/json");
+    });
+
+    svr.Get("/stats", [](const httplib::Request& /*req*/, httplib::Response& res) {
+        char hostname_buf[256] = {};
+        gethostname(hostname_buf, sizeof(hostname_buf));
+        nlohmann::json snap;
+        snap["hostname"]           = std::string(hostname_buf);
+        snap["cpu_percent"]        = g_cpu_percent_x10.load() / 10.0;
+        snap["searches_in_flight"] = g_searches_in_flight.load();
+        res.set_header("Cache-Control", "no-cache");
+        res.set_content(snap.dump(), "application/json");
     });
 
     svr.Post("/search", [](const httplib::Request& req, httplib::Response& res) {
@@ -94,7 +151,9 @@ int main() {
             return;
         }
 
+        g_searches_in_flight.fetch_add(1);
         SearchResult result = search(board, depth, noise, time_ms);
+        g_searches_in_flight.fetch_sub(1);
 
         nlohmann::json resp;
         resp["best_move"] = result.best_move.to_uci();
@@ -184,7 +243,9 @@ int main() {
                     return true;
                 };
 
+                g_searches_in_flight.fetch_add(1);
                 SearchResult result = search(board, depth, noise, time_ms, cb);
+                g_searches_in_flight.fetch_sub(1);
 
                 if (client_gone.load() || !sink.is_writable()) return false;
 

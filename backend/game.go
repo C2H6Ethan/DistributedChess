@@ -326,8 +326,10 @@ func moveHandler(db *sql.DB) http.HandlerFunc {
 			"fen":      currentFEN,
 			"uci_move": body.UCIMove,
 		})
+		globalMetrics.engineBegin()
 		engineStart := time.Now()
 		resp, err := engineClient.Post(engineURL()+"/move", "application/json", bytes.NewReader(payload))
+		globalMetrics.engineEnd()
 		globalMetrics.recordEngine(time.Since(engineStart).Milliseconds(), err != nil)
 		if err != nil {
 			jsonError(w, "engine unreachable", http.StatusBadGateway)
@@ -436,11 +438,16 @@ func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int, timeM
 	}
 	searchPayload, _ := json.Marshal(payload)
 	searchClient := &http.Client{Timeout: 120 * time.Second}
+	globalMetrics.engineBegin()
 	resp, err := searchClient.Post(engineURL()+"/search-stream", "application/json", bytes.NewReader(searchPayload))
 	if err != nil {
+		globalMetrics.engineEnd()
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		resp.Body.Close()
+		globalMetrics.engineEnd()
+	}()
 
 	// Read SSE events and track the latest best move.
 	var bestMove string
@@ -481,8 +488,10 @@ func fireBotMove(db *sql.DB, gameID int, fen string, depth int, noise int, timeM
 		"fen":      fen,
 		"uci_move": bestMove,
 	})
+	globalMetrics.engineBegin()
 	botEngineStart := time.Now()
 	mresp, err := engineClient.Post(engineURL()+"/move", "application/json", bytes.NewReader(movePayload))
+	globalMetrics.engineEnd()
 	globalMetrics.recordEngine(time.Since(botEngineStart).Milliseconds(), err != nil)
 	if err != nil {
 		return
@@ -601,14 +610,19 @@ func hintStreamHandler(db *sql.DB) http.HandlerFunc {
 			"time_ms": 5000,
 		})
 		searchClient := &http.Client{Timeout: 120 * time.Second}
+		globalMetrics.engineBegin()
 		resp, err := searchClient.Post(engineURL()+"/search-stream", "application/json", bytes.NewReader(payload))
 		if err != nil {
+			globalMetrics.engineEnd()
 			// Already sent SSE headers, so write error as SSE event.
 			fmt.Fprintf(w, "data: {\"error\":\"engine unreachable\"}\n\n")
 			flusher.Flush()
 			return
 		}
-		defer resp.Body.Close()
+		defer func() {
+			resp.Body.Close()
+			globalMetrics.engineEnd()
+		}()
 
 		if resp.StatusCode != http.StatusOK {
 			fmt.Fprintf(w, "data: {\"error\":\"engine error\"}\n\n")

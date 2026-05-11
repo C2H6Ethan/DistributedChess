@@ -14,10 +14,12 @@ func main() {
 
 	// Metrics — unauthenticated, for the infrastructure dashboard
 	mux.HandleFunc("GET /stats", statsHandler(globalMetrics))
+	mux.Handle("DELETE /admin/reset", jwtMiddleware(resetHandler(db)))
 
 	// Public routes
 	mux.Handle("POST /register", tracked("POST /register", registerHandler(db)))
 	mux.Handle("POST /login", tracked("POST /login", loginHandler(db)))
+	mux.Handle("POST /refresh", tracked("POST /refresh", refreshHandler(db)))
 
 	// Protected routes — JWT required
 	mux.Handle("POST /game", tracked("POST /game", jwtMiddleware(createGameHandler(db))))

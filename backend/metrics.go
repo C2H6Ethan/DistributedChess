@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"runtime"
 	"slices"
@@ -50,17 +53,27 @@ func (rs *routeStats) percentiles() (p50, p95 int64) {
 	return samples[n*50/100], samples[n*95/100]
 }
 
+// EngineReplicaSnap holds the latest stats for one C++ engine replica.
+type EngineReplicaSnap struct {
+	Hostname         string  `json:"hostname"`
+	CPUPercent       float64 `json:"cpu_percent"`
+	SearchesInFlight int64   `json:"searches_in_flight"`
+}
+
 type metricsStore struct {
-	routes        sync.Map // string → *routeStats
-	engineCount   atomic.Int64
-	engineErrors  atomic.Int64
-	engineTotalMs atomic.Int64
-	dbReads       atomic.Int64
-	dbWrites      atomic.Int64
-	activeConns   atomic.Int64
-	startTime     time.Time
-	hostname      string
-	cpuPercent    atomic.Value // float64
+	routes         sync.Map // string → *routeStats
+	engineCount    atomic.Int64
+	engineErrors   atomic.Int64
+	engineTotalMs  atomic.Int64
+	engineInFlight atomic.Int64
+	dbReads        atomic.Int64
+	dbWrites       atomic.Int64
+	activeConns    atomic.Int64
+	startTime      time.Time
+	hostname       string
+	cpuPercent     atomic.Value // float64
+
+	engineReplicas sync.Map // hostname → *EngineReplicaSnap
 }
 
 func newMetricsStore() *metricsStore {
@@ -71,6 +84,7 @@ func newMetricsStore() *metricsStore {
 	}
 	m.cpuPercent.Store(float64(0))
 	go m.trackCPU()
+	go m.trackEngineCPU()
 	return m
 }
 
@@ -88,6 +102,47 @@ func (m *metricsStore) recordEngine(ms int64, isErr bool) {
 	m.engineTotalMs.Add(ms)
 	if isErr {
 		m.engineErrors.Add(1)
+	}
+}
+
+func (m *metricsStore) engineBegin() { m.engineInFlight.Add(1) }
+func (m *metricsStore) engineEnd()   { m.engineInFlight.Add(-1) }
+
+// trackEngineCPU probes the engine's /stats endpoint several times per tick
+// (hitting different replicas via Docker DNS round-robin) and stores per-replica stats.
+func (m *metricsStore) trackEngineCPU() {
+	const probes = 4
+	client := &http.Client{Timeout: 2 * time.Second}
+	for range time.Tick(time.Second) {
+		type result struct{ snap *EngineReplicaSnap }
+		ch := make(chan result, probes)
+		for range probes {
+			go func() {
+				resp, err := client.Get(engineURL() + "/stats")
+				if err != nil {
+					ch <- result{}
+					return
+				}
+				body, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					ch <- result{}
+					return
+				}
+				var snap EngineReplicaSnap
+				if err := json.Unmarshal(body, &snap); err != nil || snap.Hostname == "" {
+					ch <- result{}
+					return
+				}
+				ch <- result{&snap}
+			}()
+		}
+		for range probes {
+			r := <-ch
+			if r.snap != nil {
+				m.engineReplicas.Store(r.snap.Hostname, r.snap)
+			}
+		}
 	}
 }
 

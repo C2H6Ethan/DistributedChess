@@ -1,14 +1,64 @@
 const BASE = '/api'
 
-// Token is module-level so it persists for the session without prop-drilling.
+// Tokens are module-level so they persist for the session without prop-drilling.
 let _token = localStorage.getItem('chess_token') ?? null
+let _refreshToken = localStorage.getItem('chess_refresh_token') ?? null
+let _refreshPromise = null // deduplicate concurrent refresh attempts
 
 export function setToken(t) {
   _token = t
   t ? localStorage.setItem('chess_token', t) : localStorage.removeItem('chess_token')
 }
 
+export function setRefreshToken(t) {
+  _refreshToken = t
+  t ? localStorage.setItem('chess_refresh_token', t) : localStorage.removeItem('chess_refresh_token')
+}
+
+export function clearTokens() {
+  setToken(null)
+  setRefreshToken(null)
+}
+
+async function doRefresh() {
+  if (!_refreshToken) throw new Error('No refresh token')
+  const res = await fetch(BASE + '/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: _refreshToken }),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    clearTokens()
+    throw new Error(data.error ?? 'Session expired')
+  }
+  setToken(data.token)
+  setRefreshToken(data.refresh_token)
+  return data.token
+}
+
+function refreshOnce() {
+  if (!_refreshPromise) {
+    _refreshPromise = doRefresh().finally(() => { _refreshPromise = null })
+  }
+  return _refreshPromise
+}
+
 async function req(method, path, body, { timeout = 10000 } = {}) {
+  const res = await rawReq(method, path, body, timeout)
+  if (res.status === 401 && _refreshToken) {
+    await refreshOnce()
+    const retried = await rawReq(method, path, body, timeout)
+    const data = await retried.json()
+    if (!retried.ok) throw new Error(data.error ?? 'Request failed')
+    return data
+  }
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? 'Request failed')
+  return data
+}
+
+async function rawReq(method, path, body, timeout = 10000) {
   const headers = { 'Content-Type': 'application/json' }
   if (_token) headers['Authorization'] = `Bearer ${_token}`
 
@@ -22,10 +72,7 @@ async function req(method, path, body, { timeout = 10000 } = {}) {
     signal: controller.signal,
   })
   clearTimeout(timer)
-
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error ?? 'Request failed')
-  return data
+  return res
 }
 
 /**
@@ -36,7 +83,14 @@ async function streamHint(gameId, onProgress) {
   const headers = {}
   if (_token) headers['Authorization'] = `Bearer ${_token}`
 
-  const res = await fetch(BASE + `/game/${gameId}/hint`, { headers })
+  let res = await fetch(BASE + `/game/${gameId}/hint`, { headers })
+
+  if (res.status === 401 && _refreshToken) {
+    await refreshOnce()
+    headers['Authorization'] = `Bearer ${_token}`
+    res = await fetch(BASE + `/game/${gameId}/hint`, { headers })
+  }
+
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
     throw new Error(data.error ?? 'Hint request failed')
@@ -87,4 +141,5 @@ export const api = {
   getBotThinking: (id)                            => req('GET',  `/game/${id}/bot-thinking`),
   // Unauthenticated — each call may hit a different replica via the load balancer.
   stats: () => fetch(BASE + '/stats', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+  resetDB: () => req('DELETE', '/admin/reset'),
 }

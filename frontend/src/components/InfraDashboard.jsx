@@ -208,6 +208,53 @@ function ReplicaCard({ hostname, snap, reqHistory }) {
   )
 }
 
+// ─── Engine Replica Card ───────────────────────────────────────────────────────
+
+function EngineReplicaCard({ snap }) {
+  const cpu = snap.cpu_percent ?? 0
+  const inFlight = snap.searches_in_flight ?? 0
+  const shortHost = snap.hostname.length > 14 ? snap.hostname.slice(0, 14) + '…' : snap.hostname
+
+  return (
+    <div className="bg-slate-900 border border-slate-700/40 rounded-xl p-5 flex flex-col gap-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <PulseDot active={true} />
+            <span className="text-sm font-mono font-medium text-slate-200 truncate" title={snap.hostname}>
+              {shortHost}
+            </span>
+          </div>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">C++ engine</span>
+        </div>
+        {inFlight > 0 && (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 flex-shrink-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+            <span className="text-[9px] font-semibold text-amber-400 uppercase tracking-wide">
+              searching
+            </span>
+          </span>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[10px] text-slate-500 uppercase tracking-widest">CPU</span>
+          <span className={`text-xs font-mono font-semibold ${cpuTextClass(cpu)}`}>
+            {cpu.toFixed(1)}%
+          </span>
+        </div>
+        <Bar pct={cpu} colorClass={cpuColorClass(cpu)} />
+      </div>
+
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] text-slate-500 uppercase tracking-widest">Searches in flight</span>
+        <span className="text-xs font-mono text-slate-300">{inFlight}</span>
+      </div>
+    </div>
+  )
+}
+
 // ─── Routes Table ──────────────────────────────────────────────────────────────
 
 function RoutesTable({ routes }) {
@@ -386,9 +433,24 @@ function DBPanel({ reads, writes }) {
 
 export default function InfraDashboard({ onLeave }) {
   const [, forceUpdate] = useState(0)
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const replicasRef    = useRef(new Map())  // hostname → { snap, reqHistory }
   const allReqHistRef  = useRef([])          // aggregate req/s sparkline
   const lastUpdateRef  = useRef(null)
+
+  async function handleReset() {
+    setResetting(true)
+    try {
+      await api.resetDB()
+      replicasRef.current.clear()
+      allReqHistRef.current = []
+      forceUpdate(n => n + 1)
+    } finally {
+      setResetting(false)
+      setConfirmReset(false)
+    }
+  }
 
   useEffect(() => {
     async function poll() {
@@ -441,6 +503,16 @@ export default function InfraDashboard({ onLeave }) {
   const totalConns    = allSnaps.reduce((s, snap) => s + (snap.active_conns ?? 0), 0)
   const totalEngine   = allSnaps.reduce((s, snap) => s + (snap.engine_count ?? 0), 0)
   const totalEngErr   = allSnaps.reduce((s, snap) => s + (snap.engine_errors ?? 0), 0)
+  const totalInFlight = allSnaps.reduce((s, snap) => s + (snap.engine_in_flight ?? 0), 0)
+
+  // Deduplicate engine replicas by hostname — take the latest report from any backend replica
+  const engineReplicaMap = new Map()
+  for (const snap of allSnaps) {
+    for (const er of (snap.engine_replicas ?? [])) {
+      engineReplicaMap.set(er.hostname, er)
+    }
+  }
+  const engineReplicas = [...engineReplicaMap.values()]
   const totalDBReads  = allSnaps.reduce((s, snap) => s + (snap.db_reads ?? 0), 0)
   const totalDBWrites = allSnaps.reduce((s, snap) => s + (snap.db_writes ?? 0), 0)
   const avgEngineMs   = totalEngine > 0
@@ -469,17 +541,62 @@ export default function InfraDashboard({ onLeave }) {
           <span className="text-slate-700 select-none">·</span>
           <span className="text-sm font-semibold text-slate-100">Infrastructure</span>
         </div>
-        <div className="flex items-center gap-2.5">
-          <PulseDot active={isLive} />
-          <span className="text-xs text-slate-400 tabular-nums">
-            {secondsAgo === null
-              ? 'Connecting…'
-              : isLive
-              ? 'Live'
-              : `Updated ${secondsAgo}s ago`}
-          </span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5">
+            <PulseDot active={isLive} />
+            <span className="text-xs text-slate-400 tabular-nums">
+              {secondsAgo === null
+                ? 'Connecting…'
+                : isLive
+                ? 'Live'
+                : `Updated ${secondsAgo}s ago`}
+            </span>
+          </div>
+          <button
+            onClick={() => setConfirmReset(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-950/60 text-red-400 border border-red-800/50 hover:bg-red-900/60 hover:text-red-300 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            Delete All Data
+          </button>
         </div>
       </header>
+
+      {/* ── Confirm Reset Modal ───────────────────────────────────────────── */}
+      {confirmReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-base font-semibold text-slate-100 mb-2">Delete all data?</h3>
+            <p className="text-sm text-slate-400 mb-6">
+              This will permanently delete all users, games, and moves from the database. The action cannot be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setConfirmReset(false)}
+                disabled={resetting}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReset}
+                disabled={resetting}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-500 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {resetting && (
+                  <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                )}
+                {resetting ? 'Deleting…' : 'Delete Everything'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Content ──────────────────────────────────────────────────────── */}
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
@@ -501,7 +618,9 @@ export default function InfraDashboard({ onLeave }) {
           <StatCard
             label="Engine Calls"
             value={fmt(totalEngine)}
-            sub={totalEngine > 0
+            sub={totalInFlight > 0
+              ? `${totalInFlight} searching · ${engineReplicas.length} replica${engineReplicas.length !== 1 ? 's' : ''}`
+              : totalEngine > 0
               ? `avg ${avgEngineMs.toFixed(0)}ms · ${totalEngErr} err`
               : 'no calls yet'}
             sparkColor="#f59e0b"
@@ -552,6 +671,25 @@ export default function InfraDashboard({ onLeave }) {
             </div>
           )}
         </section>
+
+        {/* Engine replicas */}
+        {engineReplicas.length > 0 && (
+          <section>
+            <div className="mb-4">
+              <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-widest">
+                C++ Engine Replicas
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {engineReplicas.length} replica{engineReplicas.length !== 1 ? 's' : ''} discovered
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {engineReplicas.map(er => (
+                <EngineReplicaCard key={er.hostname} snap={er} />
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Route table + Engine + DB */}
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">

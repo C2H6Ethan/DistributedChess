@@ -15,33 +15,40 @@ type routeSnapshot struct {
 }
 
 type statsSnapshot struct {
-	Hostname     string          `json:"hostname"`
-	UptimeS      int64           `json:"uptime_s"`
-	CPUPercent   float64         `json:"cpu_percent"`
-	MemMB        float64         `json:"mem_mb"`
-	Routes       []routeSnapshot `json:"routes"`
-	EngineCount  int64           `json:"engine_count"`
-	EngineErrors int64           `json:"engine_errors"`
-	EngineAvgMs  float64         `json:"engine_avg_ms"`
-	DBReads      int64           `json:"db_reads"`
-	DBWrites     int64           `json:"db_writes"`
-	ActiveConns  int64           `json:"active_conns"`
+	Hostname        string               `json:"hostname"`
+	UptimeS         int64                `json:"uptime_s"`
+	CPUPercent      float64              `json:"cpu_percent"`
+	MemMB           float64              `json:"mem_mb"`
+	Routes          []routeSnapshot      `json:"routes"`
+	EngineCount     int64                `json:"engine_count"`
+	EngineErrors    int64                `json:"engine_errors"`
+	EngineAvgMs     float64              `json:"engine_avg_ms"`
+	EngineInFlight  int64                `json:"engine_in_flight"`
+	EngineReplicas  []*EngineReplicaSnap `json:"engine_replicas"`
+	DBReads         int64                `json:"db_reads"`
+	DBWrites        int64                `json:"db_writes"`
+	ActiveConns     int64                `json:"active_conns"`
 }
 
 func statsHandler(m *metricsStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		snap := statsSnapshot{
-			Hostname:     m.hostname,
-			UptimeS:      int64(time.Since(m.startTime).Seconds()),
-			CPUPercent:   m.cpuPercent.Load().(float64),
-			MemMB:        memMB(),
-			EngineCount:  m.engineCount.Load(),
-			EngineErrors: m.engineErrors.Load(),
-			DBReads:      m.dbReads.Load(),
-			DBWrites:     m.dbWrites.Load(),
-			ActiveConns:  m.activeConns.Load(),
+			Hostname:       m.hostname,
+			UptimeS:        int64(time.Since(m.startTime).Seconds()),
+			CPUPercent:     m.cpuPercent.Load().(float64),
+			MemMB:          memMB(),
+			EngineCount:    m.engineCount.Load(),
+			EngineErrors:   m.engineErrors.Load(),
+			EngineInFlight: m.engineInFlight.Load(),
+			DBReads:        m.dbReads.Load(),
+			DBWrites:       m.dbWrites.Load(),
+			ActiveConns:    m.activeConns.Load(),
 		}
+		m.engineReplicas.Range(func(_, v any) bool {
+			snap.EngineReplicas = append(snap.EngineReplicas, v.(*EngineReplicaSnap))
+			return true
+		})
 		if snap.EngineCount > 0 {
 			snap.EngineAvgMs = float64(m.engineTotalMs.Load()) / float64(snap.EngineCount)
 		}
@@ -87,4 +94,11 @@ type statusWriter struct {
 func (s *statusWriter) WriteHeader(code int) {
 	s.code = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Flush proxies to the underlying ResponseWriter so SSE handlers get a real Flusher.
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

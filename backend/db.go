@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"log"
+	"net/http"
 
 	_ "github.com/lib/pq"
 )
@@ -44,6 +45,14 @@ func initDB(dsn string) *sql.DB {
 			fen_after TEXT NOT NULL,     -- board state after this move
 			UNIQUE (game_id, ply)
 		);
+
+		CREATE TABLE IF NOT EXISTS refresh_tokens (
+			id         SERIAL PRIMARY KEY,
+			user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
 	`)
 	if err != nil {
 		log.Fatalf("db migrate: %v", err)
@@ -70,4 +79,19 @@ func initDB(dsn string) *sql.DB {
 	}
 
 	return db
+}
+
+func resetHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, err := db.Exec(`
+			TRUNCATE moves, games, refresh_tokens RESTART IDENTITY CASCADE;
+			DELETE FROM users WHERE id != 0;
+			ALTER SEQUENCE users_id_seq RESTART WITH 1;
+		`)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
 }

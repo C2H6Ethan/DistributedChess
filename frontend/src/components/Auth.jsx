@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api, setToken } from '../api'
+import { api, setToken, setRefreshToken } from '../api'
 
 export default function Auth({ onAuth }) {
   const [mode, setMode] = useState('login')
@@ -13,10 +13,11 @@ export default function Auth({ onAuth }) {
     setError(null)
     setLoading(true)
     try {
-      const { token } = await (mode === 'login'
+      const { token, refresh_token } = await (mode === 'login'
         ? api.login(username, password)
         : api.register(username, password))
       setToken(token)
+      setRefreshToken(refresh_token)
       const payload = JSON.parse(atob(token.split('.')[1]))
       onAuth({ id: payload.user_id, username: payload.username })
     } catch (err) {
